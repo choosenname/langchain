@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
+import pytest
+
 from langchain_codex.session import CodexSession
 
 
@@ -10,7 +12,8 @@ class FakeTransport:
         self.requests: list[tuple[str, dict[str, Any]]] = []
         self.thread_start_calls = 0
         self._thread_id = "thr_1"
-        self._notification_handler: Callable[[dict[str, Any]], None] | None = None
+        self._notification_handlers: list[Callable[[dict[str, Any]], None]] = []
+        self.turn_start_response: dict[str, Any] = {"turn": {"id": "turn_1"}}
 
     @classmethod
     def with_thread_id(cls, thread_id: str) -> "FakeTransport":
@@ -18,13 +21,16 @@ class FakeTransport:
         transport._thread_id = thread_id
         return transport
 
-    def set_notification_handler(
+    def add_notification_handler(
         self,
-        handler: Callable[[dict[str, Any]], None] | None,
-    ) -> Callable[[dict[str, Any]], None] | None:
-        previous_handler = self._notification_handler
-        self._notification_handler = handler
-        return previous_handler
+        handler: Callable[[dict[str, Any]], None],
+    ) -> Callable[[], None]:
+        self._notification_handlers.append(handler)
+
+        def remove_handler() -> None:
+            self._notification_handlers.remove(handler)
+
+        return remove_handler
 
     def request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         self.requests.append((method, params))
@@ -81,15 +87,15 @@ class FakeTransport:
                     "params": {"turn": {"id": turn_id}},
                 }
             )
-            return {"turn": {"id": turn_id}}
+            return self.turn_start_response
         return {}
 
     def notify(self, method: str, params: dict[str, Any]) -> None:
         self.requests.append((method, params))
 
     def _emit(self, message: dict[str, Any]) -> None:
-        if self._notification_handler is not None:
-            self._notification_handler(message)
+        for handler in list(self._notification_handlers):
+            handler(message)
 
 
 def test_session_initializes_connection_once() -> None:
@@ -128,8 +134,10 @@ def test_session_defers_thread_creation_until_first_turn() -> None:
     assert transport.thread_start_calls == 1
 
 
-def test_session_collects_only_active_turn_events() -> None:
+def test_session_keeps_existing_notification_handlers_active() -> None:
     transport = FakeTransport.with_thread_id("thr_123")
+    seen: list[dict[str, Any]] = []
+    transport.add_notification_handler(seen.append)
     session = CodexSession(transport=transport, model="gpt-5.4")
 
     result = session.run_turn([{"type": "text", "text": "hello"}])
@@ -158,3 +166,23 @@ def test_session_collects_only_active_turn_events() -> None:
             },
         ],
     }
+    assert [
+        (message["method"], message.get("params", {}).get("turn", {}).get("id"))
+        for message in seen
+    ] == [
+        ("metrics/updated", None),
+        ("turn/started", "turn_1"),
+        ("turn/output", "turn_other"),
+        ("turn/completed", "turn_other"),
+        ("turn/output", "turn_1"),
+        ("turn/completed", "turn_1"),
+    ]
+
+
+def test_session_raises_when_turn_start_missing_turn_id() -> None:
+    transport = FakeTransport.with_thread_id("thr_123")
+    transport.turn_start_response = {}
+    session = CodexSession(transport=transport, model="gpt-5.4")
+
+    with pytest.raises(RuntimeError, match="turn/start response missing turn id"):
+        session.run_turn([{"type": "text", "text": "hello"}])

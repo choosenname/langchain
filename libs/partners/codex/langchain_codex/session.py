@@ -15,11 +15,11 @@ class _CodexTransport(Protocol):
     def notify(self, method: str, params: dict[str, Any]) -> None:
         """Send a notification."""
 
-    def set_notification_handler(
+    def add_notification_handler(
         self,
-        on_notification: Callable[[dict[str, Any]], None] | None,
-    ) -> Callable[[dict[str, Any]], None] | None:
-        """Install a notification handler and return the previous one."""
+        on_notification: Callable[[dict[str, Any]], None],
+    ) -> Callable[[], None]:
+        """Install an additional notification handler and return a remover."""
 
 
 class CodexSession:
@@ -74,7 +74,9 @@ class CodexSession:
                 buffered_notifications.append(message)
                 notification_condition.notify_all()
 
-        previous_handler = self._transport.set_notification_handler(collect_notification)
+        remove_notification_handler = self._transport.add_notification_handler(
+            collect_notification
+        )
         try:
             result = self._transport.request(
                 "turn/start",
@@ -83,7 +85,7 @@ class CodexSession:
                     "input": input_items,
                 },
             )
-            turn_id = result["turn"]["id"]
+            turn_id = self._extract_turn_id(result)
 
             while not turn_completed:
                 with notification_condition:
@@ -103,7 +105,7 @@ class CodexSession:
                     if message.get("method") == "turn/completed":
                         turn_completed = True
         finally:
-            self._transport.set_notification_handler(previous_handler)
+            remove_notification_handler()
 
         return {
             "thread": {"id": thread_id},
@@ -130,3 +132,18 @@ class CodexSession:
             return False
 
         return turn.get("id") == turn_id
+
+    @staticmethod
+    def _extract_turn_id(result: dict[str, Any]) -> str:
+        """Return the active turn id or raise if the response is malformed."""
+        turn = result.get("turn")
+        if not isinstance(turn, dict):
+            msg = "turn/start response missing turn id"
+            raise RuntimeError(msg)
+
+        turn_id = turn.get("id")
+        if not isinstance(turn_id, str) or not turn_id:
+            msg = "turn/start response missing turn id"
+            raise RuntimeError(msg)
+
+        return turn_id

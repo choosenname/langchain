@@ -129,7 +129,39 @@ def test_transport_routes_notifications() -> None:
     )
     transport = CodexAppServerTransport(process=process, on_notification=seen.append)
     transport.start()
+    assert transport._reader_thread is not None
+    transport._reader_thread.join(timeout=1)
     assert seen == [
+        {
+            "jsonrpc": "2.0",
+            "method": "turn/started",
+            "params": {"turn": {"id": "turn_1"}},
+        }
+    ]
+
+
+def test_transport_routes_notifications_to_multiple_handlers() -> None:
+    seen_primary: list[dict[str, Any]] = []
+    seen_secondary: list[dict[str, Any]] = []
+    process = FakeProcess(
+        stdout_lines=[
+            '{"jsonrpc": "2.0", "method": "turn/started", "params": {"turn": {"id": "turn_1"}}}\n',
+        ]
+    )
+    transport = CodexAppServerTransport(process=process, on_notification=seen_primary.append)
+    transport.add_notification_handler(seen_secondary.append)
+    transport.start()
+    assert transport._reader_thread is not None
+    transport._reader_thread.join(timeout=1)
+
+    assert seen_primary == [
+        {
+            "jsonrpc": "2.0",
+            "method": "turn/started",
+            "params": {"turn": {"id": "turn_1"}},
+        }
+    ]
+    assert seen_secondary == [
         {
             "jsonrpc": "2.0",
             "method": "turn/started",

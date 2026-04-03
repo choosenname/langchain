@@ -25,12 +25,14 @@ class CodexAppServerTransport:
         self._process = process
         self._stdin = process.stdin
         self._stdout = process.stdout
-        self._on_notification = on_notification
         self._next_id = 1
         self._lock = threading.Lock()
         self._response_events: dict[int, threading.Event] = {}
         self._responses: dict[int, dict[str, Any]] = {}
         self._reader_thread: threading.Thread | None = None
+        self._notification_handlers: list[Callable[[dict[str, Any]], None]] = []
+        if on_notification is not None:
+            self._notification_handlers.append(on_notification)
 
     def start(self) -> None:
         """Start reading the process stdout in the background."""
@@ -83,14 +85,19 @@ class CodexAppServerTransport:
             }
         )
 
-    def set_notification_handler(
+    def add_notification_handler(
         self,
-        on_notification: Callable[[dict[str, Any]], None] | None,
-    ) -> Callable[[dict[str, Any]], None] | None:
-        """Install a notification handler and return the previous one."""
-        previous_handler = self._on_notification
-        self._on_notification = on_notification
-        return previous_handler
+        on_notification: Callable[[dict[str, Any]], None],
+    ) -> Callable[[], None]:
+        """Register an additional notification handler and return a remover."""
+        with self._lock:
+            self._notification_handlers.append(on_notification)
+
+        def remove_handler() -> None:
+            with self._lock:
+                self._notification_handlers.remove(on_notification)
+
+        return remove_handler
 
     def _next_request_id(self) -> int:
         with self._lock:
@@ -123,5 +130,8 @@ class CodexAppServerTransport:
             response_event.set()
 
     def _on_notification_message(self, message: dict[str, Any]) -> None:
-        if self._on_notification is not None:
-            self._on_notification(message)
+        with self._lock:
+            handlers = list(self._notification_handlers)
+
+        for handler in handlers:
+            handler(message)
