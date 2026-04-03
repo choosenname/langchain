@@ -64,6 +64,11 @@ def test_init_missing_dep() -> None:
         init_chat_model("mixtral-8x7b-32768", model_provider="groq")
 
 
+def test_init_missing_dep_codex() -> None:
+    with pytest.raises(ImportError):
+        init_chat_model("gpt-5.4", model_provider="codex")
+
+
 def test_init_unknown_provider() -> None:
     with pytest.raises(ValueError, match="Unsupported provider='bar'"):
         init_chat_model("foo", model_provider="bar")

@@ -43,6 +43,7 @@ _BUILTIN_PROVIDERS: dict[str, tuple[str, str, Callable[..., BaseChatModel]]] = {
     "baseten": ("langchain_baseten", "ChatBaseten", _call),
     "bedrock": ("langchain_aws", "ChatBedrock", _call),
     "bedrock_converse": ("langchain_aws", "ChatBedrockConverse", _call),
+    "codex": ("langchain_codex", "ChatCodex", _call),
     "cohere": ("langchain_cohere", "ChatCohere", _call),
     "deepseek": ("langchain_deepseek", "ChatDeepSeek", _call),
     "fireworks": ("langchain_fireworks", "ChatFireworks", _call),
@@ -270,6 +271,7 @@ def init_chat_model(
             - `anthropic_bedrock`       -> [`langchain-aws`](https://docs.langchain.com/oss/python/integrations/providers/aws)
             - `bedrock`                 -> [`langchain-aws`](https://docs.langchain.com/oss/python/integrations/providers/aws)
             - `bedrock_converse`        -> [`langchain-aws`](https://docs.langchain.com/oss/python/integrations/providers/aws)
+            - `codex`                   -> [`langchain-codex`](https://docs.langchain.com/oss/python/integrations/providers/codex)
             - `cohere`                  -> [`langchain-cohere`](https://docs.langchain.com/oss/python/integrations/providers/cohere)
             - `fireworks`               -> [`langchain-fireworks`](https://docs.langchain.com/oss/python/integrations/providers/fireworks)
             - `together`                -> [`langchain-together`](https://docs.langchain.com/oss/python/integrations/providers/together)
