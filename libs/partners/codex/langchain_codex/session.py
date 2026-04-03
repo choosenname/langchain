@@ -65,12 +65,14 @@ class CodexSession:
         thread_id = self._ensure_thread()
 
         events: list[dict[str, Any]] = []
-        turn_completed = threading.Event()
+        buffered_notifications: list[dict[str, Any]] = []
+        notification_condition = threading.Condition()
+        turn_completed = False
 
         def collect_notification(message: dict[str, Any]) -> None:
-            events.append(message)
-            if message.get("method") == "turn/completed":
-                turn_completed.set()
+            with notification_condition:
+                buffered_notifications.append(message)
+                notification_condition.notify_all()
 
         previous_handler = self._transport.set_notification_handler(collect_notification)
         try:
@@ -81,7 +83,25 @@ class CodexSession:
                     "input": input_items,
                 },
             )
-            turn_completed.wait()
+            turn_id = result["turn"]["id"]
+
+            while not turn_completed:
+                with notification_condition:
+                    while not buffered_notifications and not turn_completed:
+                        notification_condition.wait()
+                    pending_notifications = buffered_notifications[:]
+                    buffered_notifications.clear()
+
+                for message in pending_notifications:
+                    if not self._is_turn_notification_for(
+                        message,
+                        turn_id,
+                    ):
+                        continue
+
+                    events.append(message)
+                    if message.get("method") == "turn/completed":
+                        turn_completed = True
         finally:
             self._transport.set_notification_handler(previous_handler)
 
@@ -97,3 +117,16 @@ class CodexSession:
             result = self._transport.request("thread/start", {"model": self.model})
             self._thread_id = result["thread"]["id"]
         return self._thread_id
+
+    @staticmethod
+    def _is_turn_notification_for(message: dict[str, Any], turn_id: str) -> bool:
+        """Return `True` when a notification belongs to the active turn."""
+        params = message.get("params")
+        if not isinstance(params, dict):
+            return False
+
+        turn = params.get("turn")
+        if not isinstance(turn, dict):
+            return False
+
+        return turn.get("id") == turn_id

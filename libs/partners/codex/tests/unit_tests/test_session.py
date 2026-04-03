@@ -36,8 +36,32 @@ class FakeTransport:
             self._emit(
                 {
                     "jsonrpc": "2.0",
+                    "method": "metrics/updated",
+                    "params": {"value": 1},
+                }
+            )
+            self._emit(
+                {
+                    "jsonrpc": "2.0",
                     "method": "turn/started",
                     "params": {"turn": {"id": turn_id}},
+                }
+            )
+            self._emit(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "turn/output",
+                    "params": {
+                        "turn": {"id": "turn_other"},
+                        "event": {"type": "text", "text": "ignore me"},
+                    },
+                }
+            )
+            self._emit(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "turn/completed",
+                    "params": {"turn": {"id": "turn_other"}},
                 }
             )
             self._emit(
@@ -91,17 +115,20 @@ def test_session_initializes_connection_once() -> None:
     assert len(transport.requests) == 2
 
 
-def test_session_reuses_thread_id_across_turns() -> None:
+def test_session_defers_thread_creation_until_first_turn() -> None:
     transport = FakeTransport.with_thread_id("thr_123")
     session = CodexSession(transport=transport, model="gpt-5.4")
 
+    assert transport.thread_start_calls == 0
+    session.ensure_started()
+    assert transport.thread_start_calls == 0
     session.run_turn([{"type": "text", "text": "hello"}])
     session.run_turn([{"type": "text", "text": "again"}])
 
     assert transport.thread_start_calls == 1
 
 
-def test_session_collects_turn_events_until_completed() -> None:
+def test_session_collects_only_active_turn_events() -> None:
     transport = FakeTransport.with_thread_id("thr_123")
     session = CodexSession(transport=transport, model="gpt-5.4")
 
