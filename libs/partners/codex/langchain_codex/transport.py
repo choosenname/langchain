@@ -72,6 +72,26 @@ class CodexAppServerTransport:
 
         return response["result"]
 
+    def notify(self, method: str, params: dict[str, Any]) -> None:
+        """Send a JSON-RPC notification."""
+        self.start()
+        self._write(
+            {
+                "jsonrpc": "2.0",
+                "method": method,
+                "params": params,
+            }
+        )
+
+    def set_notification_handler(
+        self,
+        on_notification: Callable[[dict[str, Any]], None] | None,
+    ) -> Callable[[dict[str, Any]], None] | None:
+        """Install a notification handler and return the previous one."""
+        previous_handler = self._on_notification
+        self._on_notification = on_notification
+        return previous_handler
+
     def _next_request_id(self) -> int:
         with self._lock:
             request_id = self._next_id
