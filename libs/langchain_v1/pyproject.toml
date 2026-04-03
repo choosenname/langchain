@@ -73,6 +73,7 @@ test = [
     "blockbuster>=1.5.26,<1.6.0",
     "langchain-tests",
     "langchain-openai",
+    "langchain-codex",
 ]
 lint = [
     "ruff>=0.15.0,<0.16.0",
@@ -101,6 +102,7 @@ langchain-tests = { path = "../standard-tests", editable = true }
 langchain-text-splitters = { path = "../text-splitters", editable = true }
 langchain-openai = { path = "../partners/openai", editable = true }
 langchain-anthropic = { path = "../partners/anthropic", editable = true }
+langchain-codex = { path = "../partners/codex", editable = true }
 
 [tool.ruff]
 line-length = 100

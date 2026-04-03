@@ -1982,6 +1982,7 @@ lint = [
 ]
 test = [
     { name = "blockbuster" },
+    { name = "langchain-codex" },
     { name = "langchain-openai" },
     { name = "langchain-tests" },
     { name = "pytest" },
@@ -2036,6 +2037,7 @@ provides-extras = ["community", "anthropic", "openai", "azure-ai", "google-verte
 lint = [{ name = "ruff", specifier = ">=0.15.0,<0.16.0" }]
 test = [
     { name = "blockbuster", specifier = ">=1.5.26,<1.6.0" },
+    { name = "langchain-codex", editable = "../partners/codex" },
     { name = "langchain-openai", editable = "../partners/openai" },
     { name = "langchain-tests", editable = "../standard-tests" },
     { name = "pytest", specifier = ">=8.0.0,<10.0.0" },
@@ -2184,6 +2186,20 @@ wheels = [
 ]
 
 [[package]]
+name = "langchain-codex"
+version = "0.1.0"
+source = { editable = "../partners/codex" }
+dependencies = [
+    { name = "langchain-core" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "langchain-core", editable = "../core" }]
+
+[package.metadata.requires-dev]
+test = [{ name = "pytest", specifier = ">=7.3.0,<8.0.0" }]
+
+[[package]]
 name = "langchain-community"
 version = "0.4.1"
 source = { registry = "https://pypi.org/simple" }
@@ -2209,7 +2225,7 @@ wheels = [
 
 [[package]]
 name = "langchain-core"
-version = "1.2.24"
+version = "1.2.25"
 source = { editable = "../core" }
 dependencies = [
     { name = "jsonpatch" },
