@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from langchain_codex.transport import CodexAppServerTransport
@@ -36,11 +37,20 @@ class FakeProcess:
 def test_transport_matches_response_by_id() -> None:
     process = FakeProcess(
         stdout_lines=[
-            '{"id": 1, "result": {"thread": {"id": "thr_123"}}}\n',
+            '{"jsonrpc": "2.0", "id": 2, "result": {"thread": {"id": "wrong"}}}\n',
+            '{"jsonrpc": "2.0", "id": 1, "result": {"thread": {"id": "thr_123"}}}\n',
         ]
     )
     transport = CodexAppServerTransport(process=process)
     result = transport.request("thread/start", {"model": "gpt-5.4"})
+
+    request = json.loads(process.stdin.written[0])
+    assert request == {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "thread/start",
+        "params": {"model": "gpt-5.4"},
+    }
     assert result == {"thread": {"id": "thr_123"}}
 
 
@@ -48,9 +58,15 @@ def test_transport_routes_notifications() -> None:
     seen: list[dict[str, Any]] = []
     process = FakeProcess(
         stdout_lines=[
-            '{"method": "turn/started", "params": {"turn": {"id": "turn_1"}}}\n',
+            '{"jsonrpc": "2.0", "method": "turn/started", "params": {"turn": {"id": "turn_1"}}}\n',
         ]
     )
     transport = CodexAppServerTransport(process=process, on_notification=seen.append)
     transport.start()
-    assert seen == [{"method": "turn/started", "params": {"turn": {"id": "turn_1"}}}]
+    assert seen == [
+        {
+            "jsonrpc": "2.0",
+            "method": "turn/started",
+            "params": {"turn": {"id": "turn_1"}},
+        }
+    ]

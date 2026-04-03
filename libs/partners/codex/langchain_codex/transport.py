@@ -56,7 +56,14 @@ class CodexAppServerTransport:
             self._response_events[request_id] = response_event
 
         self.start()
-        self._write({"id": request_id, "method": method, "params": params})
+        self._write(
+            {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "method": method,
+                "params": params,
+            }
+        )
         response_event.wait()
 
         with self._lock:
