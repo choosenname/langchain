@@ -48,15 +48,18 @@ class _CodexTransport(Protocol):
 
     def request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         """Send a request and return the JSON-RPC result payload."""
+        ...
 
     def notify(self, method: str, params: dict[str, Any]) -> None:
         """Send a notification."""
+        ...
 
     def add_notification_handler(
         self,
         on_notification: Callable[[dict[str, Any]], None],
     ) -> Callable[[], None]:
         """Install an additional notification handler and return a remover."""
+        ...
 
 
 class CodexSession:
@@ -141,13 +144,12 @@ class CodexSession:
         input_items: list[dict[str, Any]],
     ) -> AsyncIterator[TurnDelta]:
         """Asynchronously yield text deltas for a turn."""
-        done = object()
         loop = asyncio.get_running_loop()
-        result_queue: queue.Queue[TurnDelta | Exception | object] = queue.Queue()
+        result_queue: queue.Queue[TurnDelta | Exception | None] = queue.Queue()
         read_fd, write_fd = os.pipe()
         os.set_blocking(read_fd, False)
 
-        def submit_result(item: TurnDelta | Exception | object) -> None:
+        def submit_result(item: TurnDelta | Exception | None) -> None:
             result_queue.put(item)
             with contextlib.suppress(OSError):
                 os.write(write_fd, b"\0")
@@ -159,7 +161,7 @@ class CodexSession:
             except Exception as exc:
                 submit_result(exc)
             else:
-                submit_result(done)
+                submit_result(None)
 
         worker = threading.Thread(target=stream_in_background, daemon=True)
         worker.start()
@@ -186,7 +188,7 @@ class CodexSession:
                         os.read(read_fd, 4096)
                     continue
                 while True:
-                    if item is done:
+                    if item is None:
                         return
                     if isinstance(item, Exception):
                         raise item
@@ -205,7 +207,15 @@ class CodexSession:
         """Create the app-server thread lazily and reuse it thereafter."""
         if self._thread_id is None:
             result = self._transport.request("thread/start", {"model": self.model})
-            self._thread_id = result["thread"]["id"]
+            thread = result.get("thread")
+            if not isinstance(thread, dict):
+                msg = "thread/start response missing thread id"
+                raise CodexError(msg)
+            thread_id = thread.get("id")
+            if not isinstance(thread_id, str) or not thread_id:
+                msg = "thread/start response missing thread id"
+                raise CodexError(msg)
+            self._thread_id = thread_id
         return self._thread_id
 
     def _start_turn(self, input_items: list[dict[str, Any]]) -> _ActiveTurn:

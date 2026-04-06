@@ -1,0 +1,12 @@
+{
+  "venvPath": ".",
+  "venv": ".venv",
+  "include": [
+    "langchain_codex",
+    "tests"
+  ],
+  "exclude": [
+    ".venv",
+    "dist"
+  ]
+}

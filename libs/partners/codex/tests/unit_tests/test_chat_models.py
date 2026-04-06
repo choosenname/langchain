@@ -118,12 +118,12 @@ class DelayedStreamTransport:
 
     def add_notification_handler(
         self,
-        handler: Callable[[dict[str, Any]], None],
+        on_notification: Callable[[dict[str, Any]], None],
     ) -> Callable[[], None]:
-        self._notification_handlers.append(handler)
+        self._notification_handlers.append(on_notification)
 
         def remove_handler() -> None:
-            self._notification_handlers.remove(handler)
+            self._notification_handlers.remove(on_notification)
 
         return remove_handler
 
