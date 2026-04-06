@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
-from typing import Any
+from typing import Any, AsyncIterator, Iterator
 
 import pytest
 
@@ -11,14 +11,24 @@ from langchain_codex import ChatCodex
 
 
 class FakeSession:
-    def __init__(self, *, reply_text: str) -> None:
+    def __init__(
+        self,
+        *,
+        reply_text: str = "",
+        stream_text_chunks: list[str] | None = None,
+    ) -> None:
         self.reply_text = reply_text
+        self.stream_text_chunks = stream_text_chunks or []
         self.turn_count = 0
         self.input_items_calls: list[list[dict[str, Any]]] = []
 
     @classmethod
     def completed(cls, reply_text: str) -> "FakeSession":
         return cls(reply_text=reply_text)
+
+    @classmethod
+    def stream(cls, text_chunks: list[str]) -> "FakeSession":
+        return cls(stream_text_chunks=text_chunks)
 
     def run_turn(self, input_items: list[dict[str, Any]]) -> dict[str, Any]:
         self.turn_count += 1
@@ -46,6 +56,18 @@ class FakeSession:
                 },
             ],
         }
+
+    def stream_turn(self, input_items: list[dict[str, Any]]) -> Iterator[Any]:
+        self.turn_count += 1
+        self.input_items_calls.append(input_items)
+        for text in self.stream_text_chunks:
+            yield type("FakeDelta", (), {"text": text})()
+
+    async def astream_turn(self, input_items: list[dict[str, Any]]) -> AsyncIterator[Any]:
+        self.turn_count += 1
+        self.input_items_calls.append(input_items)
+        for text in self.stream_text_chunks:
+            yield type("FakeDelta", (), {"text": text})()
 
 
 class SlowSessionFactory:
@@ -123,6 +145,23 @@ def test_invoke_drops_unsupported_kwargs_before_session() -> None:
     assert session.input_items_calls == [
         [{"type": "text", "text": "Human: Say hi"}],
     ]
+
+
+def test_stream_yields_text_chunks_in_order() -> None:
+    model = _make_model(fake_session=FakeSession.stream(["Hel", "lo"]))
+
+    chunks = list(model.stream("Say hello"))
+
+    assert "".join(chunk.text for chunk in chunks) == "Hello"
+
+
+@pytest.mark.asyncio
+async def test_astream_yields_text_chunks_in_order() -> None:
+    model = _make_model(fake_session=FakeSession.stream(["A", "B"]))
+
+    chunks = [chunk async for chunk in model.astream("letters")]
+
+    assert "".join(chunk.text for chunk in chunks) == "AB"
 
 
 @pytest.mark.asyncio

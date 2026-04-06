@@ -14,6 +14,7 @@ class FakeTransport:
         self._thread_id = "thr_1"
         self._notification_handlers: list[Callable[[dict[str, Any]], None]] = []
         self.turn_start_response: dict[str, Any] = {"turn": {"id": "turn_1"}}
+        self.stream_text_chunks: list[str] | None = None
 
     @classmethod
     def with_thread_id(cls, thread_id: str) -> "FakeTransport":
@@ -39,6 +40,55 @@ class FakeTransport:
             return {"thread": {"id": self._thread_id}}
         if method == "turn/start":
             turn_id = "turn_1"
+            if self.stream_text_chunks is not None:
+                self._emit(
+                    {
+                        "jsonrpc": "2.0",
+                        "method": "item/updated",
+                        "params": {
+                            "turn": {"id": "turn_other"},
+                            "item": {
+                                "type": "agentMessage",
+                                "delta": [{"type": "text", "text": "ignore me"}],
+                            },
+                        },
+                    }
+                )
+                self._emit(
+                    {
+                        "jsonrpc": "2.0",
+                        "method": "item/updated",
+                        "params": {
+                            "turn": {"id": turn_id},
+                            "item": {
+                                "type": "agentMessage",
+                                "delta": [{"type": "tool_use", "name": "noop"}],
+                            },
+                        },
+                    }
+                )
+                for text in self.stream_text_chunks:
+                    self._emit(
+                        {
+                            "jsonrpc": "2.0",
+                            "method": "item/updated",
+                            "params": {
+                                "turn": {"id": turn_id},
+                                "item": {
+                                    "type": "agentMessage",
+                                    "delta": [{"type": "text", "text": text}],
+                                },
+                            },
+                        }
+                    )
+                self._emit(
+                    {
+                        "jsonrpc": "2.0",
+                        "method": "turn/completed",
+                        "params": {"turn": {"id": turn_id}},
+                    }
+                )
+                return self.turn_start_response
             self._emit(
                 {
                     "jsonrpc": "2.0",
@@ -186,3 +236,27 @@ def test_session_raises_when_turn_start_missing_turn_id() -> None:
 
     with pytest.raises(RuntimeError, match="turn/start response missing turn id"):
         session.run_turn([{"type": "text", "text": "hello"}])
+
+
+def test_stream_turn_yields_item_agent_message_text_deltas_in_order() -> None:
+    transport = FakeTransport.with_thread_id("thr_123")
+    transport.stream_text_chunks = ["Hel", "lo"]
+    session = CodexSession(transport=transport, model="gpt-5.4")
+
+    deltas = list(session.stream_turn([{"type": "text", "text": "hello"}]))
+
+    assert [delta.text for delta in deltas] == ["Hel", "lo"]
+
+
+@pytest.mark.asyncio
+async def test_astream_turn_yields_item_agent_message_text_deltas_in_order() -> None:
+    transport = FakeTransport.with_thread_id("thr_123")
+    transport.stream_text_chunks = ["A", "B"]
+    session = CodexSession(transport=transport, model="gpt-5.4")
+
+    deltas = [
+        delta.text
+        async for delta in session.astream_turn([{"type": "text", "text": "hello"}])
+    ]
+
+    assert deltas == ["A", "B"]

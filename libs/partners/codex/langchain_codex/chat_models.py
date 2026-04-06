@@ -2,14 +2,23 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator, Iterator
 import subprocess
 import threading
 from typing import Any, Callable, Protocol
 
-from langchain_core.callbacks import CallbackManagerForLLMRun
+from langchain_core.callbacks import (
+    AsyncCallbackManagerForLLMRun,
+    CallbackManagerForLLMRun,
+)
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage, BaseMessage, get_buffer_string
-from langchain_core.outputs import ChatGeneration, ChatResult
+from langchain_core.messages import (
+    AIMessage,
+    AIMessageChunk,
+    BaseMessage,
+    get_buffer_string,
+)
+from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
 from pydantic import ConfigDict, Field, PrivateAttr
 
 from langchain_codex.session import CodexSession
@@ -19,6 +28,15 @@ from langchain_codex.transport import CodexAppServerTransport
 class _CodexSessionLike(Protocol):
     def run_turn(self, input_items: list[dict[str, Any]]) -> dict[str, Any]:
         """Run one app-server turn."""
+
+    def stream_turn(self, input_items: list[dict[str, Any]]) -> Iterator[Any]:
+        """Stream text deltas for one app-server turn."""
+
+    def astream_turn(
+        self,
+        input_items: list[dict[str, Any]],
+    ) -> AsyncIterator[Any]:
+        """Asynchronously stream text deltas for one app-server turn."""
 
 
 def _get_nested_string(payload: dict[str, Any], *path: str) -> str | None:
@@ -118,6 +136,36 @@ class ChatCodex(BaseChatModel):
             },
         )
         return ChatResult(generations=[ChatGeneration(message=message)])
+
+    def _stream(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: CallbackManagerForLLMRun | None = None,
+        **kwargs: Any,
+    ) -> Iterator[ChatGenerationChunk]:
+        _ = stop
+        _ = kwargs
+        for delta in self._session().stream_turn(self._to_input_items(messages)):
+            chunk = AIMessageChunk(content=delta.text)
+            if run_manager is not None and delta.text:
+                run_manager.on_llm_new_token(delta.text, chunk=chunk)
+            yield ChatGenerationChunk(message=chunk)
+
+    async def _astream(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: AsyncCallbackManagerForLLMRun | None = None,
+        **kwargs: Any,
+    ) -> AsyncIterator[ChatGenerationChunk]:
+        _ = stop
+        _ = kwargs
+        async for delta in self._session().astream_turn(self._to_input_items(messages)):
+            chunk = AIMessageChunk(content=delta.text)
+            if run_manager is not None and delta.text:
+                await run_manager.on_llm_new_token(delta.text, chunk=chunk)
+            yield ChatGenerationChunk(message=chunk)
 
     @property
     def _llm_type(self) -> str:
