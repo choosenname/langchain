@@ -10,9 +10,15 @@ import threading
 import time
 from collections.abc import AsyncIterator, Callable, Iterator
 from dataclasses import dataclass, field
-from typing import Any, Literal, Protocol
+from typing import Literal, Protocol
 
+from langchain_codex._types import JsonObject, TextInputItem, get_json_list, get_json_object, get_str
 from langchain_codex.errors import CodexError
+
+
+def _empty_notifications() -> list[JsonObject]:
+    """Return an empty typed notification buffer."""
+    return []
 
 
 @dataclass(frozen=True)
@@ -21,7 +27,7 @@ class TurnDelta:
 
     text: str
     thread_id: str | None = None
-    turn: dict[str, Any] | None = None
+    turn: JsonObject | None = None
     chunk_position: Literal["last"] | None = None
 
 
@@ -30,13 +36,13 @@ class _ActiveTurn:
     """State required while consuming notifications for a single turn."""
 
     thread_id: str
-    turn: dict[str, Any]
+    turn: JsonObject
     turn_id: str
     notification_condition: threading.Condition = field(default_factory=threading.Condition)
-    buffered_notifications: list[dict[str, Any]] = field(default_factory=list)
+    buffered_notifications: list[JsonObject] = field(default_factory=_empty_notifications)
     remove_notification_handler: Callable[[], None] = field(default=lambda: None)
 
-    def collect_notification(self, message: dict[str, Any]) -> None:
+    def collect_notification(self, message: JsonObject) -> None:
         """Buffer a notification and wake any waiting turn consumer."""
         with self.notification_condition:
             self.buffered_notifications.append(message)
@@ -46,17 +52,17 @@ class _ActiveTurn:
 class _CodexTransport(Protocol):
     """Protocol for the transport methods used by `CodexSession`."""
 
-    def request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+    def request(self, method: str, params: JsonObject) -> JsonObject:
         """Send a request and return the JSON-RPC result payload."""
         ...
 
-    def notify(self, method: str, params: dict[str, Any]) -> None:
+    def notify(self, method: str, params: JsonObject) -> None:
         """Send a notification."""
         ...
 
     def add_notification_handler(
         self,
-        on_notification: Callable[[dict[str, Any]], None],
+        on_notification: Callable[[JsonObject], None],
     ) -> Callable[[], None]:
         """Install an additional notification handler and return a remover."""
         ...
@@ -100,7 +106,7 @@ class CodexSession:
         self._transport.notify("initialized", {})
         self._started = True
 
-    def run_turn(self, input_items: list[dict[str, Any]]) -> dict[str, Any]:
+    def run_turn(self, input_items: list[TextInputItem]) -> JsonObject:
         """Run a turn and collect turn-scoped events.
 
         Args:
@@ -118,7 +124,7 @@ class CodexSession:
             "events": events,
         }
 
-    def stream_turn(self, input_items: list[dict[str, Any]]) -> Iterator[TurnDelta]:
+    def stream_turn(self, input_items: list[TextInputItem]) -> Iterator[TurnDelta]:
         """Yield text deltas for a turn until the server confirms completion.
 
         Args:
@@ -141,7 +147,7 @@ class CodexSession:
 
     async def astream_turn(
         self,
-        input_items: list[dict[str, Any]],
+        input_items: list[TextInputItem],
     ) -> AsyncIterator[TurnDelta]:
         """Asynchronously yield text deltas for a turn."""
         loop = asyncio.get_running_loop()
@@ -207,18 +213,18 @@ class CodexSession:
         """Create the app-server thread lazily and reuse it thereafter."""
         if self._thread_id is None:
             result = self._transport.request("thread/start", {"model": self.model})
-            thread = result.get("thread")
-            if not isinstance(thread, dict):
+            thread = get_json_object(result, "thread")
+            if thread is None:
                 msg = "thread/start response missing thread id"
                 raise CodexError(msg)
-            thread_id = thread.get("id")
-            if not isinstance(thread_id, str) or not thread_id:
+            thread_id = get_str(thread, "id")
+            if thread_id is None or not thread_id:
                 msg = "thread/start response missing thread id"
                 raise CodexError(msg)
             self._thread_id = thread_id
         return self._thread_id
 
-    def _start_turn(self, input_items: list[dict[str, Any]]) -> _ActiveTurn:
+    def _start_turn(self, input_items: list[TextInputItem]) -> _ActiveTurn:
         """Start a turn and install a scoped notification buffer."""
         self.ensure_started()
         thread_id = self._ensure_thread()
@@ -243,13 +249,17 @@ class CodexSession:
             active_turn.remove_notification_handler()
             raise
         active_turn.turn = turn
-        active_turn.turn_id = turn["id"]
+        turn_id = get_str(turn, "id")
+        if turn_id is None:
+            msg = "turn/start response missing turn id"
+            raise CodexError(msg)
+        active_turn.turn_id = turn_id
         return active_turn
 
     def _iter_turn_notifications(
         self,
         active_turn: _ActiveTurn,
-    ) -> Iterator[dict[str, Any]]:
+    ) -> Iterator[JsonObject]:
         """Yield notifications for the active turn until completion."""
         turn_completed = False
         deadline = (
@@ -298,28 +308,28 @@ class CodexSession:
             active_turn.remove_notification_handler()
 
     @staticmethod
-    def _is_turn_notification_for(message: dict[str, Any], turn_id: str) -> bool:
+    def _is_turn_notification_for(message: JsonObject, turn_id: str) -> bool:
         """Return `True` when a notification belongs to the active turn."""
-        params = message.get("params")
-        if not isinstance(params, dict):
+        params = get_json_object(message, "params")
+        if params is None:
             return False
 
-        turn = params.get("turn")
-        if not isinstance(turn, dict):
+        turn = get_json_object(params, "turn")
+        if turn is None:
             return False
 
-        return turn.get("id") == turn_id
+        return get_str(turn, "id") == turn_id
 
     @staticmethod
-    def _extract_turn(result: dict[str, Any]) -> dict[str, Any]:
+    def _extract_turn(result: JsonObject) -> JsonObject:
         """Return the active turn payload or raise if the response is malformed."""
-        turn = result.get("turn")
-        if not isinstance(turn, dict):
+        turn = get_json_object(result, "turn")
+        if turn is None:
             msg = "turn/start response missing turn id"
             raise CodexError(msg)
 
-        turn_id = turn.get("id")
-        if not isinstance(turn_id, str) or not turn_id:
+        turn_id = get_str(turn, "id")
+        if turn_id is None or not turn_id:
             msg = "turn/start response missing turn id"
             raise CodexError(msg)
 
@@ -327,45 +337,46 @@ class CodexSession:
 
     @staticmethod
     def _extract_turn_from_notification(
-        message: dict[str, Any],
-    ) -> dict[str, Any] | None:
+        message: JsonObject,
+    ) -> JsonObject | None:
         """Return turn metadata from a notification when present."""
-        params = message.get("params")
-        if not isinstance(params, dict):
+        params = get_json_object(message, "params")
+        if params is None:
             return None
 
-        turn = params.get("turn")
-        if not isinstance(turn, dict):
+        turn = get_json_object(params, "turn")
+        if turn is None:
             return None
 
-        turn_id = turn.get("id")
-        if not isinstance(turn_id, str) or not turn_id:
+        turn_id = get_str(turn, "id")
+        if turn_id is None or not turn_id:
             return None
 
         return turn
 
     @staticmethod
-    def _extract_text_delta(message: dict[str, Any]) -> str | None:
+    def _extract_text_delta(message: JsonObject) -> str | None:
         """Return streamed text from an `agentMessage` delta notification."""
-        params = message.get("params")
-        if not isinstance(params, dict):
+        params = get_json_object(message, "params")
+        if params is None:
             return None
 
-        item = params.get("item")
-        if not isinstance(item, dict) or item.get("type") != "agentMessage":
+        item = get_json_object(params, "item")
+        if item is None or get_str(item, "type") != "agentMessage":
             return None
 
-        delta = item.get("delta")
-        if not isinstance(delta, list):
+        delta = get_json_list(item, "delta")
+        if delta is None:
             return None
 
-        text_parts = [
-            text
-            for block in delta
-            if isinstance(block, dict)
-            and block.get("type") == "text"
-            and isinstance(text := block.get("text"), str)
-        ]
+        text_parts: list[str] = []
+        for raw_block in delta:
+            block = get_json_object({"block": raw_block}, "block")
+            if block is None or get_str(block, "type") != "text":
+                continue
+            text = get_str(block, "text")
+            if text is not None:
+                text_parts.append(text)
         if not text_parts:
             return None
         return "".join(text_parts)

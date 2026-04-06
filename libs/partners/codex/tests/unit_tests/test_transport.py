@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import json
 import threading
-from typing import Any
+from typing import cast
 
 import pytest
 
+from langchain_codex._types import AppServerProcess, JsonObject
 from langchain_codex.transport import CodexAppServerTransport
 
 
@@ -76,12 +77,21 @@ class ControlledProcess:
         self.stdin = FakeStdin()
         self.stdout = ControlledStdout()
 
+    def poll(self) -> int | None:
+        return None
+
+
+class InspectableTransport(CodexAppServerTransport):
+    def wait_for_reader_thread(self) -> None:
+        assert self._reader_thread is not None
+        self._reader_thread.join(timeout=1)
+
 
 def test_transport_matches_out_of_order_responses_by_id() -> None:
     process = ControlledProcess()
-    transport = CodexAppServerTransport(process=process)
+    transport = InspectableTransport(process=cast(AppServerProcess, process))
 
-    results: dict[str, dict[str, Any]] = {}
+    results: dict[str, JsonObject] = {}
     errors: list[BaseException] = []
 
     def run_request(name: str, model: str) -> None:
@@ -132,16 +142,18 @@ def test_transport_matches_out_of_order_responses_by_id() -> None:
 
 
 def test_transport_routes_notifications() -> None:
-    seen: list[dict[str, Any]] = []
+    seen: list[JsonObject] = []
     process = FakeProcess(
         stdout_lines=[
             '{"jsonrpc": "2.0", "method": "turn/started", "params": {"turn": {"id": "turn_1"}}}\n',
         ]
     )
-    transport = CodexAppServerTransport(process=process, on_notification=seen.append)
+    transport = InspectableTransport(
+        process=cast(AppServerProcess, process),
+        on_notification=seen.append,
+    )
     transport.start()
-    assert transport._reader_thread is not None
-    transport._reader_thread.join(timeout=1)
+    transport.wait_for_reader_thread()
     assert seen == [
         {
             "jsonrpc": "2.0",
@@ -152,18 +164,20 @@ def test_transport_routes_notifications() -> None:
 
 
 def test_transport_routes_notifications_to_multiple_handlers() -> None:
-    seen_primary: list[dict[str, Any]] = []
-    seen_secondary: list[dict[str, Any]] = []
+    seen_primary: list[JsonObject] = []
+    seen_secondary: list[JsonObject] = []
     process = FakeProcess(
         stdout_lines=[
             '{"jsonrpc": "2.0", "method": "turn/started", "params": {"turn": {"id": "turn_1"}}}\n',
         ]
     )
-    transport = CodexAppServerTransport(process=process, on_notification=seen_primary.append)
+    transport = InspectableTransport(
+        process=cast(AppServerProcess, process),
+        on_notification=seen_primary.append,
+    )
     transport.add_notification_handler(seen_secondary.append)
     transport.start()
-    assert transport._reader_thread is not None
-    transport._reader_thread.join(timeout=1)
+    transport.wait_for_reader_thread()
 
     assert seen_primary == [
         {
@@ -187,7 +201,7 @@ def test_transport_raises_json_rpc_error_message() -> None:
             '{"jsonrpc": "2.0", "id": 1, "error": {"code": 123, "message": "Bad turn"}}\n',
         ]
     )
-    transport = CodexAppServerTransport(process=process)
+    transport = InspectableTransport(process=cast(AppServerProcess, process))
 
     with pytest.raises(RuntimeError, match="Bad turn"):
         transport.request("turn/start", {"threadId": "thr_1", "input": []})
@@ -195,7 +209,7 @@ def test_transport_raises_json_rpc_error_message() -> None:
 
 def test_transport_raises_when_process_exits_before_response() -> None:
     process = FakeProcess(stdout_lines=[], returncode=17)
-    transport = CodexAppServerTransport(process=process)
+    transport = InspectableTransport(process=cast(AppServerProcess, process))
 
     with pytest.raises(RuntimeError, match="exit code 17"):
         transport.request("thread/start", {"model": "gpt-5.4"})

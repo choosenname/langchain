@@ -7,7 +7,7 @@ import shutil
 import subprocess
 import threading
 from collections.abc import AsyncIterator, Callable, Iterator
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from langchain_core.callbacks import (
     AsyncCallbackManagerForLLMRun,
@@ -22,56 +22,67 @@ from langchain_core.messages import (
 from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
 from pydantic import ConfigDict, Field, PrivateAttr
 
+from langchain_codex._types import (
+    AppServerProcess,
+    JsonObject,
+    TextInputItem,
+    as_json_object,
+    get_json_list,
+    get_json_object,
+    get_str,
+)
 from langchain_codex.errors import CodexError, CodexInputError
 from langchain_codex.session import CodexSession, TurnDelta
 from langchain_codex.transport import CodexAppServerTransport
 
 
 class _CodexSessionLike(Protocol):
-    def run_turn(self, input_items: list[dict[str, Any]]) -> dict[str, Any]:
+    def run_turn(self, input_items: list[TextInputItem]) -> JsonObject:
         """Run one app-server turn."""
         ...
 
-    def stream_turn(self, input_items: list[dict[str, Any]]) -> Iterator[TurnDelta]:
+    def stream_turn(self, input_items: list[TextInputItem]) -> Iterator[TurnDelta]:
         """Stream text deltas for one app-server turn."""
         ...
 
     def astream_turn(
         self,
-        input_items: list[dict[str, Any]],
+        input_items: list[TextInputItem],
     ) -> AsyncIterator[TurnDelta]:
         """Asynchronously stream text deltas for one app-server turn."""
         ...
 
 
-def _get_nested_string(payload: dict[str, Any], *path: str) -> str | None:
-    value: Any = payload
+def _get_nested_string(payload: JsonObject, *path: str) -> str | None:
+    value: object = payload
     for key in path:
-        if not isinstance(value, dict):
+        nested = as_json_object(value)
+        if nested is None:
             return None
-        value = value.get(key)
+        value = nested.get(key)
     return value if isinstance(value, str) else None
 
 
-def _extract_turn_text(turn: dict[str, Any]) -> str:
+def _extract_turn_text(turn: JsonObject) -> str:
     text_chunks: list[str] = []
-    events = turn.get("events")
-    if not isinstance(events, list):
+    events = get_json_list(turn, "events")
+    if events is None:
         return ""
 
-    for message in events:
-        if not isinstance(message, dict):
+    for raw_message in events:
+        message = as_json_object(raw_message)
+        if message is None:
             continue
-        params = message.get("params")
-        if not isinstance(params, dict):
+        params = get_json_object(message, "params")
+        if params is None:
             continue
-        event = params.get("event")
-        if not isinstance(event, dict):
+        event = get_json_object(params, "event")
+        if event is None:
             continue
-        if event.get("type") != "text":
+        if get_str(event, "type") != "text":
             continue
-        text = event.get("text")
-        if isinstance(text, str):
+        text = get_str(event, "text")
+        if text is not None:
             text_chunks.append(text)
 
     return "".join(text_chunks)
@@ -81,15 +92,15 @@ def _response_metadata_from_delta(
     delta: TurnDelta,
     *,
     model_name: str,
-) -> dict[str, Any]:
-    metadata: dict[str, Any] = {
+) -> JsonObject:
+    metadata: JsonObject = {
         "model_provider": "codex",
         "model": model_name,
     }
-    thread_id = getattr(delta, "thread_id", None)
+    thread_id = delta.thread_id
     if thread_id is not None:
         metadata["thread_id"] = thread_id
-    turn = getattr(delta, "turn", None)
+    turn = delta.turn
     if turn is not None:
         turn_id = _get_nested_string({"turn": turn}, "turn", "id")
         if turn_id is not None:
@@ -153,7 +164,7 @@ class ChatCodex(BaseChatModel):
             raise CodexError(msg)
         self._process = process
         transport = CodexAppServerTransport(
-            process=process,
+            process=cast(AppServerProcess, process),
             request_timeout=self.request_timeout,
         )
         return CodexSession(
@@ -178,10 +189,11 @@ class ChatCodex(BaseChatModel):
 
         return [*command, "app-server"]
 
-    def _to_input_items(self, messages: list[BaseMessage]) -> list[dict[str, Any]]:
+    def _to_input_items(self, messages: list[BaseMessage]) -> list[TextInputItem]:
         rendered_messages: list[str] = []
         for message in messages:
-            if not isinstance(message.content, str):
+            content = getattr(message, "content")
+            if not isinstance(content, str):
                 msg = "ChatCodex only supports string message content."
                 raise CodexInputError(msg)
 
@@ -195,7 +207,7 @@ class ChatCodex(BaseChatModel):
                 msg = f"ChatCodex does not support {message.type} messages."
                 raise CodexInputError(msg)
 
-            rendered_messages.append(f"{role}: {message.content}")
+            rendered_messages.append(f"{role}: {content}")
 
         return [{"type": "text", "text": "\n".join(rendered_messages)}]
 
@@ -253,7 +265,7 @@ class ChatCodex(BaseChatModel):
                     delta,
                     model_name=self.model_name,
                 ),
-                chunk_position=getattr(delta, "chunk_position", None),
+                chunk_position=delta.chunk_position,
             )
             generation_chunk = ChatGenerationChunk(message=message_chunk)
             if run_manager is not None and delta.text:
@@ -276,7 +288,7 @@ class ChatCodex(BaseChatModel):
                     delta,
                     model_name=self.model_name,
                 ),
-                chunk_position=getattr(delta, "chunk_position", None),
+                chunk_position=delta.chunk_position,
             )
             generation_chunk = ChatGenerationChunk(message=message_chunk)
             if run_manager is not None and delta.text:
@@ -288,7 +300,7 @@ class ChatCodex(BaseChatModel):
         return "codex-chat"
 
     @property
-    def _identifying_params(self) -> dict[str, Any]:
+    def _identifying_params(self) -> JsonObject:
         return {
             "model_name": self.model_name,
             "codex_binary": self.codex_binary,
