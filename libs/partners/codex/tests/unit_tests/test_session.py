@@ -3,11 +3,10 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 import pytest
-
-import langchain_codex.session as session_module
 from langchain_codex.session import CodexSession, TurnDelta
 
 
@@ -21,9 +20,10 @@ class FakeTransport:
         self.stream_text_chunks: list[str] | None = None
         self.completed_turn: dict[str, Any] = {"id": "turn_1", "status": "completed"}
         self.stream_notification_delay: float | None = None
+        self.omit_turn_completed = False
 
     @classmethod
-    def with_thread_id(cls, thread_id: str) -> "FakeTransport":
+    def with_thread_id(cls, thread_id: str) -> FakeTransport:
         transport = cls()
         transport._thread_id = thread_id
         return transport
@@ -163,13 +163,14 @@ class FakeTransport:
             )
         if self.stream_notification_delay is not None:
             time.sleep(self.stream_notification_delay)
-        self._emit(
-            {
-                "jsonrpc": "2.0",
-                "method": "turn/completed",
-                "params": {"turn": self.completed_turn},
-            }
-        )
+        if not self.omit_turn_completed:
+            self._emit(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "turn/completed",
+                    "params": {"turn": self.completed_turn},
+                }
+            )
 
 
 def test_session_initializes_connection_once() -> None:
@@ -332,13 +333,69 @@ async def test_astream_turn_completes_with_delayed_notifications() -> None:
 
 
 @pytest.mark.asyncio
-async def test_astream_turn_avoids_executor_bridge() -> None:
+async def test_astream_turn_avoids_asyncio_to_thread_bridge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     transport = FakeTransport.with_thread_id("thr_123")
     transport.stream_text_chunks = ["A", "B"]
     transport.stream_notification_delay = 0.01
     transport.turn_start_response = {"turn": {"id": "turn_1", "status": "in_progress"}}
     session = CodexSession(transport=transport, model="gpt-5.4")
-    assert not hasattr(session_module, "run_in_executor")
+
+    async def fail_to_thread(func: Any, *args: Any, **kwargs: Any) -> Any:
+        _ = func
+        _ = args
+        _ = kwargs
+        msg = "asyncio.to_thread bridge should not be used"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(asyncio, "to_thread", fail_to_thread)
+
+    deltas = await asyncio.wait_for(
+        _collect_astream_turn(session.astream_turn([{"type": "text", "text": "hello"}])),
+        timeout=0.5,
+    )
+
+    assert deltas == [
+        TurnDelta(text="A"),
+        TurnDelta(text="B"),
+        TurnDelta(
+            text="",
+            thread_id="thr_123",
+            turn={"id": "turn_1", "status": "completed"},
+            chunk_position="last",
+        ),
+    ]
+
+
+def test_stream_turn_times_out_when_turn_never_completes() -> None:
+    transport = FakeTransport.with_thread_id("thr_123")
+    transport.stream_text_chunks = ["A"]
+    transport.omit_turn_completed = True
+    transport.turn_start_response = {"turn": {"id": "turn_1", "status": "in_progress"}}
+    session = CodexSession(transport=transport, model="gpt-5.4", turn_timeout=0.05)
+
+    with pytest.raises(RuntimeError, match="Timed out waiting for Codex app-server to complete turn"):
+        list(session.stream_turn([{"type": "text", "text": "hello"}]))
+
+
+@pytest.mark.asyncio
+async def test_astream_turn_avoids_polling_sleep_bridge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transport = FakeTransport.with_thread_id("thr_123")
+    transport.stream_text_chunks = ["A", "B"]
+    transport.stream_notification_delay = 0.01
+    transport.turn_start_response = {"turn": {"id": "turn_1", "status": "in_progress"}}
+    session = CodexSession(transport=transport, model="gpt-5.4")
+
+    async def fail_sleep(delay: float, result: Any = None) -> Any:
+        _ = delay
+        _ = result
+        msg = "polling sleep bridge should not be used"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(asyncio, "sleep", fail_sleep)
 
     deltas = await asyncio.wait_for(
         _collect_astream_turn(session.astream_turn([{"type": "text", "text": "hello"}])),

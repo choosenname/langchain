@@ -3,10 +3,16 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Iterator
-from dataclasses import dataclass, field
+import contextlib
+import os
+import queue
 import threading
-from typing import Any, Callable, Literal, Protocol
+import time
+from collections.abc import AsyncIterator, Callable, Iterator
+from dataclasses import dataclass, field
+from typing import Any, Literal, Protocol
+
+from langchain_codex.errors import CodexError
 
 
 @dataclass(frozen=True)
@@ -62,15 +68,23 @@ class CodexSession:
         "version": "0.1.0",
     }
 
-    def __init__(self, *, transport: _CodexTransport, model: str) -> None:
+    def __init__(
+        self,
+        *,
+        transport: _CodexTransport,
+        model: str,
+        turn_timeout: float | None = 60.0,
+    ) -> None:
         """Initialize the session.
 
         Args:
             transport: App-server transport used for JSON-RPC communication.
             model: Model name used when creating the persistent thread.
+            turn_timeout: Maximum seconds to wait for turn completion events.
         """
         self._transport = transport
         self.model = model
+        self._turn_timeout = turn_timeout
         self._started = False
         self._thread_id: str | None = None
 
@@ -127,29 +141,63 @@ class CodexSession:
         input_items: list[dict[str, Any]],
     ) -> AsyncIterator[TurnDelta]:
         """Asynchronously yield text deltas for a turn."""
-        loop = asyncio.get_running_loop()
         done = object()
-        queue: asyncio.Queue[TurnDelta | BaseException | object] = asyncio.Queue()
+        loop = asyncio.get_running_loop()
+        result_queue: queue.Queue[TurnDelta | Exception | object] = queue.Queue()
+        read_fd, write_fd = os.pipe()
+        os.set_blocking(read_fd, False)
+
+        def submit_result(item: TurnDelta | Exception | object) -> None:
+            result_queue.put(item)
+            with contextlib.suppress(OSError):
+                os.write(write_fd, b"\0")
 
         def stream_in_background() -> None:
             try:
                 for delta in self.stream_turn(input_items):
-                    loop.call_soon_threadsafe(queue.put_nowait, delta)
-            except BaseException as exc:
-                loop.call_soon_threadsafe(queue.put_nowait, exc)
+                    submit_result(delta)
+            except Exception as exc:
+                submit_result(exc)
             else:
-                loop.call_soon_threadsafe(queue.put_nowait, done)
+                submit_result(done)
 
         worker = threading.Thread(target=stream_in_background, daemon=True)
         worker.start()
 
-        while True:
-            item = await queue.get()
-            if item is done:
-                break
-            if isinstance(item, BaseException):
-                raise item
-            yield item
+        try:
+            while True:
+                try:
+                    item = result_queue.get_nowait()
+                except queue.Empty:
+                    wakeup = loop.create_future()
+
+                    def on_ready() -> None:
+                        if not wakeup.done():
+                            wakeup.set_result(None)
+
+                    loop.add_reader(read_fd, on_ready)
+                    try:
+                        await wakeup
+                    finally:
+                        loop.remove_reader(read_fd)
+                    with contextlib.suppress(OSError):
+                        os.read(read_fd, 4096)
+                    continue
+                while True:
+                    if item is done:
+                        return
+                    if isinstance(item, Exception):
+                        raise item
+                    yield item
+                    try:
+                        item = result_queue.get_nowait()
+                    except queue.Empty:
+                        break
+        finally:
+            with contextlib.suppress(OSError):
+                os.close(read_fd)
+            with contextlib.suppress(OSError):
+                os.close(write_fd)
 
     def _ensure_thread(self) -> str:
         """Create the app-server thread lazily and reuse it thereafter."""
@@ -192,11 +240,35 @@ class CodexSession:
     ) -> Iterator[dict[str, Any]]:
         """Yield notifications for the active turn until completion."""
         turn_completed = False
+        deadline = (
+            None
+            if self._turn_timeout is None
+            else time.monotonic() + self._turn_timeout
+        )
         try:
             while not turn_completed:
                 with active_turn.notification_condition:
                     while not active_turn.buffered_notifications and not turn_completed:
-                        active_turn.notification_condition.wait()
+                        remaining = (
+                            None
+                            if deadline is None
+                            else max(0.0, deadline - time.monotonic())
+                        )
+                        if remaining == 0.0:
+                            msg = (
+                                "Timed out waiting for Codex app-server to complete "
+                                f"turn {active_turn.turn_id!r}."
+                            )
+                            raise CodexError(msg)
+                        active_turn.notification_condition.wait(timeout=remaining)
+                        if not active_turn.buffered_notifications and deadline is not None:
+                            remaining = deadline - time.monotonic()
+                            if remaining <= 0:
+                                msg = (
+                                    "Timed out waiting for Codex app-server to complete "
+                                    f"turn {active_turn.turn_id!r}."
+                                )
+                                raise CodexError(msg)
                     pending_notifications = active_turn.buffered_notifications[:]
                     active_turn.buffered_notifications.clear()
 
@@ -232,12 +304,12 @@ class CodexSession:
         turn = result.get("turn")
         if not isinstance(turn, dict):
             msg = "turn/start response missing turn id"
-            raise RuntimeError(msg)
+            raise CodexError(msg)
 
         turn_id = turn.get("id")
         if not isinstance(turn_id, str) or not turn_id:
             msg = "turn/start response missing turn id"
-            raise RuntimeError(msg)
+            raise CodexError(msg)
 
         return turn
 
