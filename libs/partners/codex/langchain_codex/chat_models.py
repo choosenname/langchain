@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Iterator
+import shutil
 import subprocess
 import threading
-from typing import Any, Callable, Protocol
+from collections.abc import AsyncIterator, Callable, Iterator
+from typing import Any, Protocol
 
 from langchain_core.callbacks import (
     AsyncCallbackManagerForLLMRun,
@@ -16,11 +17,11 @@ from langchain_core.messages import (
     AIMessage,
     AIMessageChunk,
     BaseMessage,
-    get_buffer_string,
 )
 from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
 from pydantic import ConfigDict, Field, PrivateAttr
 
+from langchain_codex.errors import CodexError, CodexInputError
 from langchain_codex.session import CodexSession, TurnDelta
 from langchain_codex.transport import CodexAppServerTransport
 
@@ -100,6 +101,8 @@ class ChatCodex(BaseChatModel):
 
     model_name: str = Field(alias="model")
     codex_binary: str = "codex"
+    request_timeout: float | None = 30.0
+    turn_timeout: float | None = 60.0
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -120,6 +123,13 @@ class ChatCodex(BaseChatModel):
         return self._session_instance
 
     def _build_session(self) -> CodexSession:
+        if shutil.which(self.codex_binary) is None:
+            msg = (
+                "Unable to launch Codex app-server because "
+                f"{self.codex_binary!r} is not available on PATH."
+            )
+            raise CodexError(msg)
+
         process = subprocess.Popen(
             [self.codex_binary, "app-server"],
             stdin=subprocess.PIPE,
@@ -129,13 +139,38 @@ class ChatCodex(BaseChatModel):
         )
         if process.stdin is None or process.stdout is None:
             msg = "Codex app-server process did not expose stdio pipes."
-            raise RuntimeError(msg)
+            raise CodexError(msg)
         self._process = process
-        transport = CodexAppServerTransport(process=process)
-        return CodexSession(transport=transport, model=self.model_name)
+        transport = CodexAppServerTransport(
+            process=process,
+            request_timeout=self.request_timeout,
+        )
+        return CodexSession(
+            transport=transport,
+            model=self.model_name,
+            turn_timeout=self.turn_timeout,
+        )
 
     def _to_input_items(self, messages: list[BaseMessage]) -> list[dict[str, Any]]:
-        return [{"type": "text", "text": get_buffer_string(messages)}]
+        rendered_messages: list[str] = []
+        for message in messages:
+            if not isinstance(message.content, str):
+                msg = "ChatCodex only supports string message content."
+                raise CodexInputError(msg)
+
+            if message.type == "human":
+                role = "Human"
+            elif message.type == "ai":
+                role = "AI"
+            elif message.type == "system":
+                role = "System"
+            else:
+                msg = f"ChatCodex does not support {message.type} messages."
+                raise CodexInputError(msg)
+
+            rendered_messages.append(f"{role}: {message.content}")
+
+        return [{"type": "text", "text": "\n".join(rendered_messages)}]
 
     def _generate(
         self,
@@ -147,6 +182,21 @@ class ChatCodex(BaseChatModel):
         _ = stop
         _ = run_manager
         _ = kwargs
+        return self._create_chat_result(messages)
+
+    async def _agenerate(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: AsyncCallbackManagerForLLMRun | None = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        _ = stop
+        _ = run_manager
+        _ = kwargs
+        return self._create_chat_result(messages)
+
+    def _create_chat_result(self, messages: list[BaseMessage]) -> ChatResult:
         turn = self._session().run_turn(self._to_input_items(messages))
         message = AIMessage(
             content=_extract_turn_text(turn),
@@ -213,4 +263,6 @@ class ChatCodex(BaseChatModel):
         return {
             "model_name": self.model_name,
             "codex_binary": self.codex_binary,
+            "request_timeout": self.request_timeout,
+            "turn_timeout": self.turn_timeout,
         }

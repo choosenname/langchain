@@ -64,9 +64,14 @@ def test_init_missing_dep() -> None:
         init_chat_model("mixtral-8x7b-32768", model_provider="groq")
 
 
-def test_init_missing_dep_codex() -> None:
-    with pytest.raises(ImportError):
-        init_chat_model("gpt-5.4", model_provider="codex")
+def test_init_chat_model_codex() -> None:
+    llm = init_chat_model("gpt-5.4", model_provider="codex")
+
+    assert llm.__class__.__name__ == "ChatCodex"
+
+
+def test_builtin_provider_map_contains_codex() -> None:
+    assert "codex" in _BUILTIN_PROVIDERS
 
 
 def test_init_unknown_provider() -> None:

@@ -171,9 +171,11 @@ class CodexSession:
                 except queue.Empty:
                     wakeup = loop.create_future()
 
-                    def on_ready() -> None:
-                        if not wakeup.done():
-                            wakeup.set_result(None)
+                    def on_ready(
+                        ready_future: asyncio.Future[None] = wakeup,
+                    ) -> None:
+                        if not ready_future.done():
+                            ready_future.set_result(None)
 
                     loop.add_reader(read_fd, on_ready)
                     try:

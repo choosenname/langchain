@@ -3,9 +3,11 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
-from typing import Any, AsyncIterator, Callable, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
+from typing import Any
 
 import pytest
+from langchain_core.messages import HumanMessage, ToolMessage
 
 from langchain_codex import ChatCodex
 from langchain_codex.session import CodexSession, TurnDelta
@@ -31,11 +33,11 @@ class FakeSession:
         self.input_items_calls: list[list[dict[str, Any]]] = []
 
     @classmethod
-    def completed(cls, reply_text: str) -> "FakeSession":
+    def completed(cls, reply_text: str) -> FakeSession:
         return cls(reply_text=reply_text)
 
     @classmethod
-    def stream(cls, text_chunks: list[str]) -> "FakeSession":
+    def stream(cls, text_chunks: list[str]) -> FakeSession:
         return cls(stream_text_chunks=text_chunks)
 
     @classmethod
@@ -45,7 +47,7 @@ class FakeSession:
         *,
         thread_id: str = "thr_123",
         turn: dict[str, Any],
-    ) -> "FakeSession":
+    ) -> FakeSession:
         return cls(
             stream_text_chunks=text_chunks,
             stream_completed_turn=turn,
@@ -244,6 +246,28 @@ def test_invoke_drops_unsupported_kwargs_before_session() -> None:
     assert session.input_items_calls == [
         [{"type": "text", "text": "Human: Say hi"}],
     ]
+
+
+def test_missing_binary_raises_clear_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("langchain_codex.chat_models.shutil.which", lambda _: None)
+    model = ChatCodex(model="gpt-5.4", codex_binary="missing-codex")
+
+    with pytest.raises(RuntimeError, match=r"missing-codex.*PATH"):
+        model.invoke("Say hi")
+
+
+def test_invoke_rejects_unsupported_message_content() -> None:
+    model = _make_model(fake_session=FakeSession.completed("unused"))
+
+    with pytest.raises(RuntimeError, match="only supports string message content"):
+        model.invoke([HumanMessage(content=[{"type": "text", "text": "hi"}])])
+
+
+def test_invoke_rejects_unsupported_message_type() -> None:
+    model = _make_model(fake_session=FakeSession.completed("unused"))
+
+    with pytest.raises(RuntimeError, match="does not support tool messages"):
+        model.invoke([ToolMessage(content="tool output", tool_call_id="call_123")])
 
 
 def test_stream_yields_text_chunks_in_order() -> None:

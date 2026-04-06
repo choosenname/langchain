@@ -12,6 +12,51 @@ dependencies = [
 
 [dependency-groups]
 test = ["pytest>=7.3.0,<8.0.0"]
+lint = ["ruff>=0.15.0,<0.16.0"]
 
 [tool.uv.sources]
 langchain-core = { path = "../../core", editable = true }
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.format]
+docstring-code-format = true
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+    "ANN401",
+    "BLE001",
+    "C901",
+    "COM812",
+    "ISC001",
+    "PERF203",
+    "FIX002",
+    "PLR0915",
+    "TD002",
+    "TD003",
+    "TC002",
+    "TC003",
+    "RUF012",
+    "S603",
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+ignore-var-parameters = true
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"
+
+[tool.ruff.lint.extend-per-file-ignores]
+"tests/**/*.py" = [
+    "ARG001",
+    "ARG002",
+    "D",
+    "INP001",
+    "PLR2004",
+    "PT011",
+    "S101",
+    "SLF001",
+]

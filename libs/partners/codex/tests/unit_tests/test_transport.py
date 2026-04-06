@@ -4,6 +4,8 @@ import json
 import threading
 from typing import Any
 
+import pytest
+
 from langchain_codex.transport import CodexAppServerTransport
 
 
@@ -38,9 +40,18 @@ class FakeStdout:
 
 
 class FakeProcess:
-    def __init__(self, *, stdout_lines: list[str]) -> None:
+    def __init__(
+        self,
+        *,
+        stdout_lines: list[str],
+        returncode: int | None = None,
+    ) -> None:
         self.stdin = FakeStdin()
         self.stdout = FakeStdout(stdout_lines)
+        self._returncode = returncode
+
+    def poll(self) -> int | None:
+        return self._returncode
 
 
 class ControlledStdout:
@@ -76,7 +87,7 @@ def test_transport_matches_out_of_order_responses_by_id() -> None:
     def run_request(name: str, model: str) -> None:
         try:
             results[name] = transport.request("thread/start", {"model": model})
-        except BaseException as exc:  # pragma: no cover - surfaced by assertion
+        except Exception as exc:  # pragma: no cover - surfaced by assertion
             errors.append(exc)
 
     first = threading.Thread(target=run_request, args=("first", "gpt-5.4"))
@@ -168,3 +179,23 @@ def test_transport_routes_notifications_to_multiple_handlers() -> None:
             "params": {"turn": {"id": "turn_1"}},
         }
     ]
+
+
+def test_transport_raises_json_rpc_error_message() -> None:
+    process = FakeProcess(
+        stdout_lines=[
+            '{"jsonrpc": "2.0", "id": 1, "error": {"code": 123, "message": "Bad turn"}}\n',
+        ]
+    )
+    transport = CodexAppServerTransport(process=process)
+
+    with pytest.raises(RuntimeError, match="Bad turn"):
+        transport.request("turn/start", {"threadId": "thr_1", "input": []})
+
+
+def test_transport_raises_when_process_exits_before_response() -> None:
+    process = FakeProcess(stdout_lines=[], returncode=17)
+    transport = CodexAppServerTransport(process=process)
+
+    with pytest.raises(RuntimeError, match="exit code 17"):
+        transport.request("thread/start", {"model": "gpt-5.4"})

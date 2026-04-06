@@ -7,6 +7,7 @@ from collections.abc import Callable
 from typing import Any
 
 import pytest
+
 from langchain_codex.session import CodexSession, TurnDelta
 
 
@@ -375,7 +376,10 @@ def test_stream_turn_times_out_when_turn_never_completes() -> None:
     transport.turn_start_response = {"turn": {"id": "turn_1", "status": "in_progress"}}
     session = CodexSession(transport=transport, model="gpt-5.4", turn_timeout=0.05)
 
-    with pytest.raises(RuntimeError, match="Timed out waiting for Codex app-server to complete turn"):
+    with pytest.raises(
+        RuntimeError,
+        match="Timed out waiting for Codex app-server to complete turn",
+    ):
         list(session.stream_turn([{"type": "text", "text": "hello"}]))
 
 

@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import json
 import threading
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
+
+from langchain_codex.errors import CodexTransportError
 
 
 class CodexAppServerTransport:
@@ -15,22 +18,26 @@ class CodexAppServerTransport:
         *,
         process: Any,
         on_notification: Callable[[dict[str, Any]], None] | None = None,
+        request_timeout: float | None = 30.0,
     ) -> None:
         """Initialize the transport.
 
         Args:
             process: Subprocess-like object with `stdin` and `stdout` file handles.
             on_notification: Optional callback invoked for JSON-RPC notifications.
+            request_timeout: Maximum seconds to wait for a JSON-RPC response.
         """
         self._process = process
         self._stdin = process.stdin
         self._stdout = process.stdout
+        self._request_timeout = request_timeout
         self._next_id = 1
         self._lock = threading.Lock()
         self._response_events: dict[int, threading.Event] = {}
         self._responses: dict[int, dict[str, Any]] = {}
         self._reader_thread: threading.Thread | None = None
         self._notification_handlers: list[Callable[[dict[str, Any]], None]] = []
+        self._reader_error: CodexTransportError | None = None
         if on_notification is not None:
             self._notification_handlers.append(on_notification)
 
@@ -52,27 +59,40 @@ class CodexAppServerTransport:
         response_event = threading.Event()
 
         with self._lock:
-            cached_response = self._responses.pop(request_id, None)
-            if cached_response is not None:
-                return cached_response["result"]
+            if self._reader_error is not None:
+                raise self._reader_error
             self._response_events[request_id] = response_event
 
         self.start()
-        self._write(
-            {
-                "jsonrpc": "2.0",
-                "id": request_id,
-                "method": method,
-                "params": params,
-            }
-        )
-        response_event.wait()
+        try:
+            self._write(
+                {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "method": method,
+                    "params": params,
+                }
+            )
+        except OSError as exc:
+            with self._lock:
+                self._response_events.pop(request_id, None)
+            msg = "Failed to write request to Codex app-server."
+            raise CodexTransportError(msg) from exc
+
+        response_event.wait(timeout=self._request_timeout)
 
         with self._lock:
-            response = self._responses.pop(request_id)
+            response = self._responses.pop(request_id, None)
             self._response_events.pop(request_id, None)
+            reader_error = self._reader_error
 
-        return response["result"]
+        if response is not None:
+            return self._extract_result(method, response)
+        if reader_error is not None:
+            raise reader_error
+
+        msg = f"Timed out waiting for Codex app-server response to {method!r}."
+        raise CodexTransportError(msg)
 
     def notify(self, method: str, params: dict[str, Any]) -> None:
         """Send a JSON-RPC notification."""
@@ -111,14 +131,28 @@ class CodexAppServerTransport:
         self._stdin.flush()
 
     def _reader_loop(self) -> None:
-        for line in iter(self._stdout.readline, ""):
-            if not line:
-                break
-            message = json.loads(line)
-            if "id" in message:
-                self._deliver_response(message)
-            else:
-                self._on_notification_message(message)
+        try:
+            for line in iter(self._stdout.readline, ""):
+                if not line:
+                    break
+                try:
+                    message = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    msg = "Codex app-server emitted invalid JSON-RPC output."
+                    self._set_reader_error(CodexTransportError(msg))
+                    raise CodexTransportError(msg) from exc
+                if "id" in message:
+                    self._deliver_response(message)
+                else:
+                    self._on_notification_message(message)
+        except CodexTransportError:
+            return
+        except OSError as exc:
+            msg = "Failed while reading from Codex app-server."
+            self._set_reader_error(CodexTransportError(msg))
+            raise CodexTransportError(msg) from exc
+
+        self._set_reader_error(CodexTransportError(self._process_exit_message()))
 
     def _deliver_response(self, message: dict[str, Any]) -> None:
         request_id = message["id"]
@@ -135,3 +169,38 @@ class CodexAppServerTransport:
 
         for handler in handlers:
             handler(message)
+
+    def _set_reader_error(self, error: CodexTransportError) -> None:
+        with self._lock:
+            if self._reader_error is not None:
+                return
+            self._reader_error = error
+            response_events = list(self._response_events.values())
+
+        for response_event in response_events:
+            response_event.set()
+
+    def _extract_result(self, method: str, response: dict[str, Any]) -> dict[str, Any]:
+        error = response.get("error")
+        if isinstance(error, dict):
+            error_message = error.get("message")
+            if not isinstance(error_message, str) or not error_message:
+                error_message = "unknown error"
+            msg = f"Codex app-server request failed for {method!r}: {error_message}"
+            raise CodexTransportError(msg)
+
+        result = response.get("result")
+        if not isinstance(result, dict):
+            msg = f"Codex app-server response for {method!r} did not include a result object."
+            raise CodexTransportError(msg)
+        return result
+
+    def _process_exit_message(self) -> str:
+        poll = getattr(self._process, "poll", None)
+        returncode = poll() if callable(poll) else None
+        if isinstance(returncode, int):
+            return (
+                "Codex app-server exited before responding "
+                f"(exit code {returncode})."
+            )
+        return "Codex app-server closed stdout before responding."
