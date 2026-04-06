@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass, field
 import threading
 from typing import Any, Callable, Literal, Protocol
-
-from langchain_core.runnables.config import run_in_executor
 
 
 @dataclass(frozen=True)
@@ -128,13 +127,29 @@ class CodexSession:
         input_items: list[dict[str, Any]],
     ) -> AsyncIterator[TurnDelta]:
         """Asynchronously yield text deltas for a turn."""
-        iterator = await run_in_executor(None, self.stream_turn, input_items)
+        loop = asyncio.get_running_loop()
         done = object()
+        queue: asyncio.Queue[TurnDelta | BaseException | object] = asyncio.Queue()
+
+        def stream_in_background() -> None:
+            try:
+                for delta in self.stream_turn(input_items):
+                    loop.call_soon_threadsafe(queue.put_nowait, delta)
+            except BaseException as exc:
+                loop.call_soon_threadsafe(queue.put_nowait, exc)
+            else:
+                loop.call_soon_threadsafe(queue.put_nowait, done)
+
+        worker = threading.Thread(target=stream_in_background, daemon=True)
+        worker.start()
+
         while True:
-            item = await run_in_executor(None, next, iterator, done)
+            item = await queue.get()
             if item is done:
                 break
-            yield item  # type: ignore[misc]
+            if isinstance(item, BaseException):
+                raise item
+            yield item
 
     def _ensure_thread(self) -> str:
         """Create the app-server thread lazily and reuse it thereafter."""

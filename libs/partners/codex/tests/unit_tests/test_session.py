@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import asyncio
+import threading
+import time
 from typing import Any, Callable
 
 import pytest
 
-from langchain_codex.session import CodexSession
+import langchain_codex.session as session_module
+from langchain_codex.session import CodexSession, TurnDelta
 
 
 class FakeTransport:
@@ -16,6 +20,7 @@ class FakeTransport:
         self.turn_start_response: dict[str, Any] = {"turn": {"id": "turn_1"}}
         self.stream_text_chunks: list[str] | None = None
         self.completed_turn: dict[str, Any] = {"id": "turn_1", "status": "completed"}
+        self.stream_notification_delay: float | None = None
 
     @classmethod
     def with_thread_id(cls, thread_id: str) -> "FakeTransport":
@@ -42,53 +47,14 @@ class FakeTransport:
         if method == "turn/start":
             turn_id = "turn_1"
             if self.stream_text_chunks is not None:
-                self._emit(
-                    {
-                        "jsonrpc": "2.0",
-                        "method": "item/updated",
-                        "params": {
-                            "turn": {"id": "turn_other"},
-                            "item": {
-                                "type": "agentMessage",
-                                "delta": [{"type": "text", "text": "ignore me"}],
-                            },
-                        },
-                    }
-                )
-                self._emit(
-                    {
-                        "jsonrpc": "2.0",
-                        "method": "item/updated",
-                        "params": {
-                            "turn": {"id": turn_id},
-                            "item": {
-                                "type": "agentMessage",
-                                "delta": [{"type": "tool_use", "name": "noop"}],
-                            },
-                        },
-                    }
-                )
-                for text in self.stream_text_chunks:
-                    self._emit(
-                        {
-                            "jsonrpc": "2.0",
-                            "method": "item/updated",
-                            "params": {
-                                "turn": {"id": turn_id},
-                                "item": {
-                                    "type": "agentMessage",
-                                    "delta": [{"type": "text", "text": text}],
-                                },
-                            },
-                        }
-                    )
-                self._emit(
-                    {
-                        "jsonrpc": "2.0",
-                        "method": "turn/completed",
-                        "params": {"turn": self.completed_turn},
-                    }
-                )
+                if self.stream_notification_delay is None:
+                    self._emit_stream_notifications(turn_id)
+                else:
+                    threading.Thread(
+                        target=self._emit_stream_notifications,
+                        args=(turn_id,),
+                        daemon=True,
+                    ).start()
                 return self.turn_start_response
             self._emit(
                 {
@@ -147,6 +113,63 @@ class FakeTransport:
     def _emit(self, message: dict[str, Any]) -> None:
         for handler in list(self._notification_handlers):
             handler(message)
+
+    def _emit_stream_notifications(self, turn_id: str) -> None:
+        if self.stream_notification_delay is not None:
+            time.sleep(self.stream_notification_delay)
+        self._emit(
+            {
+                "jsonrpc": "2.0",
+                "method": "item/updated",
+                "params": {
+                    "turn": {"id": "turn_other"},
+                    "item": {
+                        "type": "agentMessage",
+                        "delta": [{"type": "text", "text": "ignore me"}],
+                    },
+                },
+            }
+        )
+        if self.stream_notification_delay is not None:
+            time.sleep(self.stream_notification_delay)
+        self._emit(
+            {
+                "jsonrpc": "2.0",
+                "method": "item/updated",
+                "params": {
+                    "turn": {"id": turn_id},
+                    "item": {
+                        "type": "agentMessage",
+                        "delta": [{"type": "tool_use", "name": "noop"}],
+                    },
+                },
+            }
+        )
+        for text in self.stream_text_chunks or []:
+            if self.stream_notification_delay is not None:
+                time.sleep(self.stream_notification_delay)
+            self._emit(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "item/updated",
+                    "params": {
+                        "turn": {"id": turn_id},
+                        "item": {
+                            "type": "agentMessage",
+                            "delta": [{"type": "text", "text": text}],
+                        },
+                    },
+                }
+            )
+        if self.stream_notification_delay is not None:
+            time.sleep(self.stream_notification_delay)
+        self._emit(
+            {
+                "jsonrpc": "2.0",
+                "method": "turn/completed",
+                "params": {"turn": self.completed_turn},
+            }
+        )
 
 
 def test_session_initializes_connection_once() -> None:
@@ -247,10 +270,16 @@ def test_stream_turn_yields_item_agent_message_text_deltas_in_order() -> None:
 
     deltas = list(session.stream_turn([{"type": "text", "text": "hello"}]))
 
-    assert [delta.text for delta in deltas] == ["Hel", "lo", ""]
-    assert deltas[-1].thread_id == "thr_123"
-    assert deltas[-1].turn == {"id": "turn_1", "status": "completed"}
-    assert deltas[-1].chunk_position == "last"
+    assert deltas == [
+        TurnDelta(text="Hel"),
+        TurnDelta(text="lo"),
+        TurnDelta(
+            text="",
+            thread_id="thr_123",
+            turn={"id": "turn_1", "status": "completed"},
+            chunk_position="last",
+        ),
+    ]
 
 
 @pytest.mark.asyncio
@@ -265,7 +294,70 @@ async def test_astream_turn_yields_item_agent_message_text_deltas_in_order() -> 
         async for delta in session.astream_turn([{"type": "text", "text": "hello"}])
     ]
 
-    assert [delta.text for delta in deltas] == ["A", "B", ""]
-    assert deltas[-1].thread_id == "thr_123"
-    assert deltas[-1].turn == {"id": "turn_1", "status": "completed"}
-    assert deltas[-1].chunk_position == "last"
+    assert deltas == [
+        TurnDelta(text="A"),
+        TurnDelta(text="B"),
+        TurnDelta(
+            text="",
+            thread_id="thr_123",
+            turn={"id": "turn_1", "status": "completed"},
+            chunk_position="last",
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_astream_turn_completes_with_delayed_notifications() -> None:
+    transport = FakeTransport.with_thread_id("thr_123")
+    transport.stream_text_chunks = ["A", "B"]
+    transport.stream_notification_delay = 0.01
+    transport.turn_start_response = {"turn": {"id": "turn_1", "status": "in_progress"}}
+    session = CodexSession(transport=transport, model="gpt-5.4")
+
+    deltas = await asyncio.wait_for(
+        _collect_astream_turn(session.astream_turn([{"type": "text", "text": "hello"}])),
+        timeout=0.5,
+    )
+
+    assert deltas == [
+        TurnDelta(text="A"),
+        TurnDelta(text="B"),
+        TurnDelta(
+            text="",
+            thread_id="thr_123",
+            turn={"id": "turn_1", "status": "completed"},
+            chunk_position="last",
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_astream_turn_avoids_executor_bridge() -> None:
+    transport = FakeTransport.with_thread_id("thr_123")
+    transport.stream_text_chunks = ["A", "B"]
+    transport.stream_notification_delay = 0.01
+    transport.turn_start_response = {"turn": {"id": "turn_1", "status": "in_progress"}}
+    session = CodexSession(transport=transport, model="gpt-5.4")
+    assert not hasattr(session_module, "run_in_executor")
+
+    deltas = await asyncio.wait_for(
+        _collect_astream_turn(session.astream_turn([{"type": "text", "text": "hello"}])),
+        timeout=0.5,
+    )
+
+    assert deltas == [
+        TurnDelta(text="A"),
+        TurnDelta(text="B"),
+        TurnDelta(
+            text="",
+            thread_id="thr_123",
+            turn={"id": "turn_1", "status": "completed"},
+            chunk_position="last",
+        ),
+    ]
+
+
+async def _collect_astream_turn(
+    stream: Any,
+) -> list[TurnDelta]:
+    return [delta async for delta in stream]

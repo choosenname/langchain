@@ -3,11 +3,12 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
-from typing import Any, AsyncIterator, Iterator
+from typing import Any, AsyncIterator, Callable, Iterator
 
 import pytest
 
 from langchain_codex import ChatCodex
+from langchain_codex.session import CodexSession, TurnDelta
 
 
 class FakeSession:
@@ -78,37 +79,94 @@ class FakeSession:
             ],
         }
 
-    def stream_turn(self, input_items: list[dict[str, Any]]) -> Iterator[Any]:
+    def stream_turn(self, input_items: list[dict[str, Any]]) -> Iterator[TurnDelta]:
         self.turn_count += 1
         self.input_items_calls.append(input_items)
         for text in self.stream_text_chunks:
-            yield type("FakeDelta", (), {"text": text})()
-        yield type(
-            "FakeDelta",
-            (),
-            {
-                "text": "",
-                "thread_id": self.stream_thread_id,
-                "turn": self.stream_completed_turn,
-                "chunk_position": "last",
-            },
-        )()
+            yield TurnDelta(text=text)
+        yield TurnDelta(
+            text="",
+            thread_id=self.stream_thread_id,
+            turn=self.stream_completed_turn,
+            chunk_position="last",
+        )
 
-    async def astream_turn(self, input_items: list[dict[str, Any]]) -> AsyncIterator[Any]:
+    async def astream_turn(
+        self,
+        input_items: list[dict[str, Any]],
+    ) -> AsyncIterator[TurnDelta]:
         self.turn_count += 1
         self.input_items_calls.append(input_items)
         for text in self.stream_text_chunks:
-            yield type("FakeDelta", (), {"text": text})()
-        yield type(
-            "FakeDelta",
-            (),
+            yield TurnDelta(text=text)
+        yield TurnDelta(
+            text="",
+            thread_id=self.stream_thread_id,
+            turn=self.stream_completed_turn,
+            chunk_position="last",
+        )
+
+
+class DelayedStreamTransport:
+    def __init__(self) -> None:
+        self._thread_id = "thr_123"
+        self._notification_handlers: list[Callable[[dict[str, Any]], None]] = []
+        self.turn_start_response = {"turn": {"id": "turn_1", "status": "in_progress"}}
+        self.completed_turn = {"id": "turn_1", "status": "completed"}
+
+    def add_notification_handler(
+        self,
+        handler: Callable[[dict[str, Any]], None],
+    ) -> Callable[[], None]:
+        self._notification_handlers.append(handler)
+
+        def remove_handler() -> None:
+            self._notification_handlers.remove(handler)
+
+        return remove_handler
+
+    def request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        if method == "initialize":
+            return {}
+        if method == "thread/start":
+            return {"thread": {"id": self._thread_id}}
+        if method == "turn/start":
+            threading.Thread(target=self._emit_turn_notifications, daemon=True).start()
+            return self.turn_start_response
+        return {}
+
+    def notify(self, method: str, params: dict[str, Any]) -> None:
+        _ = method
+        _ = params
+
+    def _emit_turn_notifications(self) -> None:
+        for text in ["A", "B"]:
+            time.sleep(0.01)
+            self._emit(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "item/updated",
+                    "params": {
+                        "turn": {"id": "turn_1"},
+                        "item": {
+                            "type": "agentMessage",
+                            "delta": [{"type": "text", "text": text}],
+                        },
+                    },
+                }
+            )
+        time.sleep(0.01)
+        self._emit(
             {
-                "text": "",
-                "thread_id": self.stream_thread_id,
-                "turn": self.stream_completed_turn,
-                "chunk_position": "last",
-            },
-        )()
+                "jsonrpc": "2.0",
+                "method": "turn/completed",
+                "params": {"turn": self.completed_turn},
+            }
+        )
+
+    def _emit(self, message: dict[str, Any]) -> None:
+        for handler in list(self._notification_handlers):
+            handler(message)
 
 
 class SlowSessionFactory:
@@ -243,6 +301,27 @@ async def test_astream_surfaces_authoritative_completed_turn_state() -> None:
 
 
 @pytest.mark.asyncio
+async def test_astream_uses_real_codex_session_with_fake_transport() -> None:
+    model = ChatCodex(model="gpt-5.4")
+    model._session_factory = lambda: CodexSession(
+        transport=DelayedStreamTransport(),
+        model="gpt-5.4",
+    )
+    model._session_instance = None
+
+    chunks = await asyncio.wait_for(
+        _collect_astream_chunks(model.astream("letters")),
+        timeout=0.5,
+    )
+
+    assert "".join(chunk.text for chunk in chunks) == "AB"
+    assert chunks[-1].response_metadata["thread_id"] == "thr_123"
+    assert chunks[-1].response_metadata["turn_id"] == "turn_1"
+    assert chunks[-1].response_metadata["turn_status"] == "completed"
+    assert chunks[-1].chunk_position == "last"
+
+
+@pytest.mark.asyncio
 async def test_concurrent_ainvoke_reuses_one_lazy_session() -> None:
     factory = SlowSessionFactory()
     model = _make_model(session_factory=factory)
@@ -259,3 +338,7 @@ async def test_concurrent_ainvoke_reuses_one_lazy_session() -> None:
         [{"type": "text", "text": "Human: one"}],
         [{"type": "text", "text": "Human: two"}],
     ]
+
+
+async def _collect_astream_chunks(stream: Any) -> list[Any]:
+    return [chunk async for chunk in stream]
