@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass, field
 import threading
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, Literal, Protocol
 
 from langchain_core.runnables.config import run_in_executor
 
@@ -15,6 +15,9 @@ class TurnDelta:
     """Incremental text emitted while a turn is running."""
 
     text: str
+    thread_id: str | None = None
+    turn: dict[str, Any] | None = None
+    chunk_position: Literal["last"] | None = None
 
 
 @dataclass
@@ -113,6 +116,12 @@ class CodexSession:
             text = self._extract_text_delta(message)
             if text is not None:
                 yield TurnDelta(text=text)
+        yield TurnDelta(
+            text="",
+            thread_id=active_turn.thread_id,
+            turn=active_turn.turn,
+            chunk_position="last",
+        )
 
     async def astream_turn(
         self,

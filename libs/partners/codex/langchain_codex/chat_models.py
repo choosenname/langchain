@@ -21,7 +21,7 @@ from langchain_core.messages import (
 from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
 from pydantic import ConfigDict, Field, PrivateAttr
 
-from langchain_codex.session import CodexSession
+from langchain_codex.session import CodexSession, TurnDelta
 from langchain_codex.transport import CodexAppServerTransport
 
 
@@ -29,13 +29,13 @@ class _CodexSessionLike(Protocol):
     def run_turn(self, input_items: list[dict[str, Any]]) -> dict[str, Any]:
         """Run one app-server turn."""
 
-    def stream_turn(self, input_items: list[dict[str, Any]]) -> Iterator[Any]:
+    def stream_turn(self, input_items: list[dict[str, Any]]) -> Iterator[TurnDelta]:
         """Stream text deltas for one app-server turn."""
 
     def astream_turn(
         self,
         input_items: list[dict[str, Any]],
-    ) -> AsyncIterator[Any]:
+    ) -> AsyncIterator[TurnDelta]:
         """Asynchronously stream text deltas for one app-server turn."""
 
 
@@ -70,6 +70,29 @@ def _extract_turn_text(turn: dict[str, Any]) -> str:
             text_chunks.append(text)
 
     return "".join(text_chunks)
+
+
+def _response_metadata_from_delta(
+    delta: TurnDelta,
+    *,
+    model_name: str,
+) -> dict[str, Any]:
+    metadata = {
+        "model_provider": "codex",
+        "model": model_name,
+    }
+    thread_id = getattr(delta, "thread_id", None)
+    if thread_id is not None:
+        metadata["thread_id"] = thread_id
+    turn = getattr(delta, "turn", None)
+    if turn is not None:
+        metadata["turn_id"] = _get_nested_string({"turn": turn}, "turn", "id")
+        metadata["turn_status"] = _get_nested_string(
+            {"turn": turn},
+            "turn",
+            "status",
+        )
+    return metadata
 
 
 class ChatCodex(BaseChatModel):
@@ -147,7 +170,14 @@ class ChatCodex(BaseChatModel):
         _ = stop
         _ = kwargs
         for delta in self._session().stream_turn(self._to_input_items(messages)):
-            chunk = AIMessageChunk(content=delta.text)
+            chunk = AIMessageChunk(
+                content=delta.text,
+                response_metadata=_response_metadata_from_delta(
+                    delta,
+                    model_name=self.model_name,
+                ),
+                chunk_position=getattr(delta, "chunk_position", None),
+            )
             if run_manager is not None and delta.text:
                 run_manager.on_llm_new_token(delta.text, chunk=chunk)
             yield ChatGenerationChunk(message=chunk)
@@ -162,7 +192,14 @@ class ChatCodex(BaseChatModel):
         _ = stop
         _ = kwargs
         async for delta in self._session().astream_turn(self._to_input_items(messages)):
-            chunk = AIMessageChunk(content=delta.text)
+            chunk = AIMessageChunk(
+                content=delta.text,
+                response_metadata=_response_metadata_from_delta(
+                    delta,
+                    model_name=self.model_name,
+                ),
+                chunk_position=getattr(delta, "chunk_position", None),
+            )
             if run_manager is not None and delta.text:
                 await run_manager.on_llm_new_token(delta.text, chunk=chunk)
             yield ChatGenerationChunk(message=chunk)

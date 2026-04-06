@@ -16,9 +16,16 @@ class FakeSession:
         *,
         reply_text: str = "",
         stream_text_chunks: list[str] | None = None,
+        stream_completed_turn: dict[str, Any] | None = None,
+        stream_thread_id: str = "thr_123",
     ) -> None:
         self.reply_text = reply_text
         self.stream_text_chunks = stream_text_chunks or []
+        self.stream_completed_turn = stream_completed_turn or {
+            "id": "turn_123",
+            "status": "completed",
+        }
+        self.stream_thread_id = stream_thread_id
         self.turn_count = 0
         self.input_items_calls: list[list[dict[str, Any]]] = []
 
@@ -29,6 +36,20 @@ class FakeSession:
     @classmethod
     def stream(cls, text_chunks: list[str]) -> "FakeSession":
         return cls(stream_text_chunks=text_chunks)
+
+    @classmethod
+    def stream_with_completed_turn(
+        cls,
+        text_chunks: list[str],
+        *,
+        thread_id: str = "thr_123",
+        turn: dict[str, Any],
+    ) -> "FakeSession":
+        return cls(
+            stream_text_chunks=text_chunks,
+            stream_completed_turn=turn,
+            stream_thread_id=thread_id,
+        )
 
     def run_turn(self, input_items: list[dict[str, Any]]) -> dict[str, Any]:
         self.turn_count += 1
@@ -62,12 +83,32 @@ class FakeSession:
         self.input_items_calls.append(input_items)
         for text in self.stream_text_chunks:
             yield type("FakeDelta", (), {"text": text})()
+        yield type(
+            "FakeDelta",
+            (),
+            {
+                "text": "",
+                "thread_id": self.stream_thread_id,
+                "turn": self.stream_completed_turn,
+                "chunk_position": "last",
+            },
+        )()
 
     async def astream_turn(self, input_items: list[dict[str, Any]]) -> AsyncIterator[Any]:
         self.turn_count += 1
         self.input_items_calls.append(input_items)
         for text in self.stream_text_chunks:
             yield type("FakeDelta", (), {"text": text})()
+        yield type(
+            "FakeDelta",
+            (),
+            {
+                "text": "",
+                "thread_id": self.stream_thread_id,
+                "turn": self.stream_completed_turn,
+                "chunk_position": "last",
+            },
+        )()
 
 
 class SlowSessionFactory:
@@ -153,6 +194,24 @@ def test_stream_yields_text_chunks_in_order() -> None:
     chunks = list(model.stream("Say hello"))
 
     assert "".join(chunk.text for chunk in chunks) == "Hello"
+    assert chunks[-1].chunk_position == "last"
+
+
+def test_stream_surfaces_authoritative_completed_turn_state() -> None:
+    model = _make_model(
+        fake_session=FakeSession.stream_with_completed_turn(
+            ["draft"],
+            turn={"id": "turn_123", "status": "completed"},
+        )
+    )
+
+    chunks = list(model.stream("Say hello"))
+
+    assert "".join(chunk.text for chunk in chunks) == "draft"
+    assert chunks[-1].response_metadata["thread_id"] == "thr_123"
+    assert chunks[-1].response_metadata["turn_id"] == "turn_123"
+    assert chunks[-1].response_metadata["turn_status"] == "completed"
+    assert chunks[-1].chunk_position == "last"
 
 
 @pytest.mark.asyncio
@@ -162,6 +221,25 @@ async def test_astream_yields_text_chunks_in_order() -> None:
     chunks = [chunk async for chunk in model.astream("letters")]
 
     assert "".join(chunk.text for chunk in chunks) == "AB"
+    assert chunks[-1].chunk_position == "last"
+
+
+@pytest.mark.asyncio
+async def test_astream_surfaces_authoritative_completed_turn_state() -> None:
+    model = _make_model(
+        fake_session=FakeSession.stream_with_completed_turn(
+            ["draft"],
+            turn={"id": "turn_123", "status": "completed"},
+        )
+    )
+
+    chunks = [chunk async for chunk in model.astream("letters")]
+
+    assert "".join(chunk.text for chunk in chunks) == "draft"
+    assert chunks[-1].response_metadata["thread_id"] == "thr_123"
+    assert chunks[-1].response_metadata["turn_id"] == "turn_123"
+    assert chunks[-1].response_metadata["turn_status"] == "completed"
+    assert chunks[-1].chunk_position == "last"
 
 
 @pytest.mark.asyncio

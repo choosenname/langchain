@@ -15,6 +15,7 @@ class FakeTransport:
         self._notification_handlers: list[Callable[[dict[str, Any]], None]] = []
         self.turn_start_response: dict[str, Any] = {"turn": {"id": "turn_1"}}
         self.stream_text_chunks: list[str] | None = None
+        self.completed_turn: dict[str, Any] = {"id": "turn_1", "status": "completed"}
 
     @classmethod
     def with_thread_id(cls, thread_id: str) -> "FakeTransport":
@@ -85,7 +86,7 @@ class FakeTransport:
                     {
                         "jsonrpc": "2.0",
                         "method": "turn/completed",
-                        "params": {"turn": {"id": turn_id}},
+                        "params": {"turn": self.completed_turn},
                     }
                 )
                 return self.turn_start_response
@@ -241,22 +242,30 @@ def test_session_raises_when_turn_start_missing_turn_id() -> None:
 def test_stream_turn_yields_item_agent_message_text_deltas_in_order() -> None:
     transport = FakeTransport.with_thread_id("thr_123")
     transport.stream_text_chunks = ["Hel", "lo"]
+    transport.turn_start_response = {"turn": {"id": "turn_1", "status": "in_progress"}}
     session = CodexSession(transport=transport, model="gpt-5.4")
 
     deltas = list(session.stream_turn([{"type": "text", "text": "hello"}]))
 
-    assert [delta.text for delta in deltas] == ["Hel", "lo"]
+    assert [delta.text for delta in deltas] == ["Hel", "lo", ""]
+    assert deltas[-1].thread_id == "thr_123"
+    assert deltas[-1].turn == {"id": "turn_1", "status": "completed"}
+    assert deltas[-1].chunk_position == "last"
 
 
 @pytest.mark.asyncio
 async def test_astream_turn_yields_item_agent_message_text_deltas_in_order() -> None:
     transport = FakeTransport.with_thread_id("thr_123")
     transport.stream_text_chunks = ["A", "B"]
+    transport.turn_start_response = {"turn": {"id": "turn_1", "status": "in_progress"}}
     session = CodexSession(transport=transport, model="gpt-5.4")
 
     deltas = [
-        delta.text
+        delta
         async for delta in session.astream_turn([{"type": "text", "text": "hello"}])
     ]
 
-    assert deltas == ["A", "B"]
+    assert [delta.text for delta in deltas] == ["A", "B", ""]
+    assert deltas[-1].thread_id == "thr_123"
+    assert deltas[-1].turn == {"id": "turn_1", "status": "completed"}
+    assert deltas[-1].chunk_position == "last"
