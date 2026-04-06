@@ -49,8 +49,8 @@ Behavior:
 
 Examples:
 
-- `ChatCodex(model="gpt-5.4")` launches `codex app-server`
-- `ChatCodex(model="gpt-5.4", codex_command="ai-creds run codex")` launches
+- `ChatCodex(model="gpt-5.4")` runs `codex app-server`
+- `ChatCodex(model="gpt-5.4", codex_command="ai-creds run codex")` runs
   `ai-creds run codex app-server`
 
 ## Alternatives Considered
