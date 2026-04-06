@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+import threading
 from typing import Any, Callable, Protocol
 
 from langchain_core.callbacks import CallbackManagerForLLMRun
@@ -16,9 +17,7 @@ from langchain_codex.transport import CodexAppServerTransport
 
 
 class _CodexSessionLike(Protocol):
-    def run_turn(
-        self, input_items: list[dict[str, Any]], **kwargs: Any
-    ) -> dict[str, Any]:
+    def run_turn(self, input_items: list[dict[str, Any]]) -> dict[str, Any]:
         """Run one app-server turn."""
 
 
@@ -64,15 +63,19 @@ class ChatCodex(BaseChatModel):
     model_config = ConfigDict(populate_by_name=True)
 
     _process: subprocess.Popen[str] | None = PrivateAttr(default=None)
+    _session_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     _session_factory: Callable[[], _CodexSessionLike] | None = PrivateAttr(default=None)
     _session_instance: _CodexSessionLike | None = PrivateAttr(default=None)
 
     def _session(self) -> _CodexSessionLike:
-        if self._session_instance is None:
-            if self._session_factory is not None:
-                self._session_instance = self._session_factory()
-            else:
-                self._session_instance = self._build_session()
+        if self._session_instance is not None:
+            return self._session_instance
+        with self._session_lock:
+            if self._session_instance is None:
+                if self._session_factory is not None:
+                    self._session_instance = self._session_factory()
+                else:
+                    self._session_instance = self._build_session()
         return self._session_instance
 
     def _build_session(self) -> CodexSession:
@@ -102,7 +105,8 @@ class ChatCodex(BaseChatModel):
     ) -> ChatResult:
         _ = stop
         _ = run_manager
-        turn = self._session().run_turn(self._to_input_items(messages), **kwargs)
+        _ = kwargs
+        turn = self._session().run_turn(self._to_input_items(messages))
         message = AIMessage(
             content=_extract_turn_text(turn),
             response_metadata={
