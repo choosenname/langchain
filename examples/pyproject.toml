@@ -1,0 +1,10 @@
+[project]
+name = "codex-simple-example"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "langchain-codex>=0.1.0",
+]
+
+[tool.uv.sources]
+langchain-codex = { path = "../libs/partners/codex", editable = true }

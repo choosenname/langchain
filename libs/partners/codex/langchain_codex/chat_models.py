@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shlex
 import shutil
 import subprocess
 import threading
@@ -108,6 +109,7 @@ class ChatCodex(BaseChatModel):
 
     model_name: str = Field(alias="model")
     codex_binary: str = "codex"
+    codex_command: str | None = None
     request_timeout: float | None = 30.0
     turn_timeout: float | None = 60.0
 
@@ -130,15 +132,17 @@ class ChatCodex(BaseChatModel):
         return self._session_instance
 
     def _build_session(self) -> CodexSession:
-        if shutil.which(self.codex_binary) is None:
+        command = self._app_server_command()
+        executable = command[0]
+        if shutil.which(executable) is None:
             msg = (
                 "Unable to launch Codex app-server because "
-                f"{self.codex_binary!r} is not available on PATH."
+                f"{executable!r} is not available on PATH."
             )
             raise CodexError(msg)
 
         process = subprocess.Popen(
-            [self.codex_binary, "app-server"],
+            command,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
@@ -157,6 +161,22 @@ class ChatCodex(BaseChatModel):
             model=self.model_name,
             turn_timeout=self.turn_timeout,
         )
+
+    def _app_server_command(self) -> list[str]:
+        if self.codex_command is None:
+            return [self.codex_binary, "app-server"]
+
+        try:
+            command = shlex.split(self.codex_command)
+        except ValueError as err:
+            msg = f"Invalid codex_command: {err}"
+            raise CodexError(msg) from err
+
+        if not command:
+            msg = "Invalid codex_command: command must not be empty."
+            raise CodexError(msg)
+
+        return [*command, "app-server"]
 
     def _to_input_items(self, messages: list[BaseMessage]) -> list[dict[str, Any]]:
         rendered_messages: list[str] = []
@@ -272,6 +292,7 @@ class ChatCodex(BaseChatModel):
         return {
             "model_name": self.model_name,
             "codex_binary": self.codex_binary,
+            "codex_command": self.codex_command,
             "request_timeout": self.request_timeout,
             "turn_timeout": self.turn_timeout,
         }

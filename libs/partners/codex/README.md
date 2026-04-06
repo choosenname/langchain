@@ -7,6 +7,8 @@ process.
 
 - The `codex` CLI must be installed and available on `PATH`.
 - This integration launches `codex app-server` locally over `stdio`.
+- If Codex must run through a wrapper such as `ai-creds`, configure
+  `codex_command`.
 
 ## Usage
 
@@ -14,6 +16,20 @@ process.
 from langchain_codex import ChatCodex
 
 model = ChatCodex(model="gpt-5.4")
+
+response = model.invoke("Summarize this repository.")
+print(response.content)
+```
+
+If your environment requires a command prefix, pass `codex_command`:
+
+```python
+from langchain_codex import ChatCodex
+
+model = ChatCodex(
+    model="gpt-5.4",
+    codex_command="ai-creds run codex",
+)
 
 response = model.invoke("Summarize this repository.")
 print(response.content)

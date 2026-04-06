@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import threading
 import time
 from collections.abc import AsyncIterator, Callable, Iterator
@@ -190,6 +191,13 @@ class SlowSessionFactory:
         return session
 
 
+class DummyPopen:
+    def __init__(self, args: list[str]) -> None:
+        self.args = args
+        self.stdin = io.StringIO()
+        self.stdout = io.StringIO()
+
+
 def _make_model(
     *,
     fake_session: FakeSession | None = None,
@@ -254,6 +262,104 @@ def test_missing_binary_raises_clear_error(monkeypatch: pytest.MonkeyPatch) -> N
 
     with pytest.raises(RuntimeError, match=r"missing-codex.*PATH"):
         model.invoke("Say hi")
+
+
+def test_build_session_uses_codex_command_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    popen_calls: list[list[str]] = []
+
+    def fake_which(binary: str) -> str:
+        assert binary == "ai-creds"
+        return f"/usr/bin/{binary}"
+
+    def fake_popen(
+        args: list[str],
+        *,
+        stdin: Any,
+        stdout: Any,
+        stderr: Any,
+        text: bool,
+    ) -> DummyPopen:
+        _ = stdin
+        _ = stdout
+        _ = stderr
+        assert text is True
+        popen_calls.append(args)
+        return DummyPopen(args)
+
+    monkeypatch.setattr("langchain_codex.chat_models.shutil.which", fake_which)
+    monkeypatch.setattr("langchain_codex.chat_models.subprocess.Popen", fake_popen)
+    monkeypatch.setattr(
+        "langchain_codex.chat_models.CodexAppServerTransport",
+        lambda **kwargs: kwargs,
+    )
+    monkeypatch.setattr(
+        "langchain_codex.chat_models.CodexSession",
+        lambda **kwargs: kwargs,
+    )
+
+    model = ChatCodex(model="gpt-5.4", codex_command="ai-creds run codex")
+
+    model._build_session()
+
+    assert popen_calls == [["ai-creds", "run", "codex", "app-server"]]
+
+
+def test_build_session_uses_default_codex_binary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    popen_calls: list[list[str]] = []
+
+    def fake_which(binary: str) -> str:
+        assert binary == "codex"
+        return f"/usr/bin/{binary}"
+
+    def fake_popen(
+        args: list[str],
+        *,
+        stdin: Any,
+        stdout: Any,
+        stderr: Any,
+        text: bool,
+    ) -> DummyPopen:
+        _ = stdin
+        _ = stdout
+        _ = stderr
+        assert text is True
+        popen_calls.append(args)
+        return DummyPopen(args)
+
+    monkeypatch.setattr("langchain_codex.chat_models.shutil.which", fake_which)
+    monkeypatch.setattr("langchain_codex.chat_models.subprocess.Popen", fake_popen)
+    monkeypatch.setattr(
+        "langchain_codex.chat_models.CodexAppServerTransport",
+        lambda **kwargs: kwargs,
+    )
+    monkeypatch.setattr(
+        "langchain_codex.chat_models.CodexSession",
+        lambda **kwargs: kwargs,
+    )
+
+    model = ChatCodex(model="gpt-5.4")
+
+    model._build_session()
+
+    assert popen_calls == [["codex", "app-server"]]
+
+
+def test_build_session_rejects_empty_codex_command() -> None:
+    model = ChatCodex(model="gpt-5.4", codex_command="")
+
+    with pytest.raises(RuntimeError, match="codex_command"):
+        model._build_session()
+
+
+def test_build_session_rejects_invalid_codex_command() -> None:
+    model = ChatCodex(model="gpt-5.4", codex_command='"ai-creds run codex')
+
+    with pytest.raises(RuntimeError, match="Invalid codex_command"):
+        model._build_session()
 
 
 def test_invoke_rejects_unsupported_message_content() -> None:
