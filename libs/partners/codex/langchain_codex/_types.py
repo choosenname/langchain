@@ -57,6 +57,16 @@ def as_json_object(value: object) -> JsonObject | None:
     return cast("JsonObject", raw_mapping)
 
 
+def _get_nested_value(payload: JsonObject, *path: str) -> object | None:
+    current: object = payload
+    for key in path:
+        current_object = as_json_object(current)
+        if current_object is None:
+            return None
+        current = current_object.get(key)
+    return current
+
+
 def get_json_object(payload: JsonObject, key: str) -> JsonObject | None:
     """Return a nested JSON object from `payload` when present."""
     return as_json_object(payload.get(key))
@@ -64,17 +74,18 @@ def get_json_object(payload: JsonObject, key: str) -> JsonObject | None:
 
 def get_nested_json_object(payload: JsonObject, *path: str) -> JsonObject | None:
     """Return a nested JSON object from `payload` when the full path exists."""
-    current: JsonObject | None = payload
-    for key in path:
-        if current is None:
-            return None
-        current = get_json_object(current, key)
-    return current
+    return as_json_object(_get_nested_value(payload, *path))
 
 
 def get_json_list(payload: JsonObject, key: str) -> list[object] | None:
     """Return a nested JSON list from `payload` when present."""
     value = payload.get(key)
+    return cast("list[object]", value) if isinstance(value, list) else None
+
+
+def get_nested_json_list(payload: JsonObject, *path: str) -> list[object] | None:
+    """Return a nested JSON list from `payload` when the full path exists."""
+    value = _get_nested_value(payload, *path)
     return cast("list[object]", value) if isinstance(value, list) else None
 
 
@@ -88,10 +99,5 @@ def get_nested_str(payload: JsonObject, *path: str) -> str | None:
     """Return a nested string from `payload` when the full path exists."""
     if not path:
         return None
-
-    current = payload
-    for key in path[:-1]:
-        current = get_json_object(current, key)
-        if current is None:
-            return None
-    return get_str(current, path[-1])
+    value = _get_nested_value(payload, *path)
+    return value if isinstance(value, str) else None

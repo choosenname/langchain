@@ -161,7 +161,7 @@ class CodexAppServerTransport:
             for line in iter(self._stdout.readline, ""):
                 if not line:
                     break
-                self._handle_reader_message(line)
+                self._dispatch_reader_message(line)
         except CodexTransportError:
             return
         except OSError as exc:
@@ -186,15 +186,23 @@ class CodexAppServerTransport:
         except OSError:
             return
 
-    def _handle_reader_message(self, line: str) -> None:
+    def _dispatch_reader_message(self, line: str) -> None:
         message = self._parse_message(line)
-        if "id" in message and "method" in message:
+        if self._is_server_request(message):
             self._handle_server_request(message)
             return
-        if "id" in message:
+        if self._is_response(message):
             self._deliver_response(message)
             return
         self._on_notification_message(message)
+
+    @staticmethod
+    def _is_server_request(message: JsonObject) -> bool:
+        return "id" in message and get_str(message, "method") is not None
+
+    @staticmethod
+    def _is_response(message: JsonObject) -> bool:
+        return "id" in message and get_str(message, "method") is None
 
     def _parse_message(self, line: str) -> JsonObject:
         try:

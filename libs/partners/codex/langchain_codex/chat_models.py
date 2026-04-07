@@ -29,8 +29,8 @@ from langchain_codex._types import (
     as_json_object,
     get_json_list,
     get_json_object,
+    get_nested_json_list,
     get_nested_json_object,
-    get_nested_str,
     get_str,
 )
 from langchain_codex.errors import CodexError, CodexInputError
@@ -86,7 +86,7 @@ def _agent_message_delta_text(message: JsonObject) -> str | None:
     if item is None or get_str(item, "type") != "agentMessage":
         return None
 
-    delta_blocks = get_json_list(item, "delta")
+    delta_blocks = get_nested_json_list(item, "delta")
     if delta_blocks is None:
         return None
 
@@ -148,10 +148,10 @@ def _response_metadata_from_delta(
         metadata["thread_id"] = thread_id
     turn = delta.turn
     if turn is not None:
-        turn_id = get_nested_str({"turn": turn}, "turn", "id")
+        turn_id = get_str(turn, "id")
         if turn_id is not None:
             metadata["turn_id"] = turn_id
-        turn_status = get_nested_str({"turn": turn}, "turn", "status")
+        turn_status = get_str(turn, "status")
         if turn_status is not None:
             metadata["turn_status"] = turn_status
     return metadata
@@ -264,12 +264,16 @@ class ChatCodex(BaseChatModel):
         return [{"type": "text", "text": "\n".join(rendered_messages)}]
 
     def _chat_result_metadata(self, turn: JsonObject) -> JsonObject:
+        thread = get_nested_json_object(turn, "thread")
+        turn_metadata = get_nested_json_object(turn, "turn")
         return {
             "model_provider": "codex",
             "model": self.model_name,
-            "thread_id": get_nested_str(turn, "thread", "id"),
-            "turn_id": get_nested_str(turn, "turn", "id"),
-            "turn_status": get_nested_str(turn, "turn", "status"),
+            "thread_id": None if thread is None else get_str(thread, "id"),
+            "turn_id": None if turn_metadata is None else get_str(turn_metadata, "id"),
+            "turn_status": None
+            if turn_metadata is None
+            else get_str(turn_metadata, "status"),
         }
 
     def _generation_chunk_from_delta(self, delta: TurnDelta) -> ChatGenerationChunk:

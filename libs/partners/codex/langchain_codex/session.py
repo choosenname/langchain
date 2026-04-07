@@ -18,6 +18,7 @@ from langchain_codex._types import (
     as_json_object,
     get_json_list,
     get_json_object,
+    get_nested_json_list,
     get_nested_json_object,
     get_str,
 )
@@ -246,12 +247,7 @@ class CodexSession:
     def _ensure_thread(self) -> str:
         """Create the app-server thread lazily and reuse it thereafter."""
         if self._thread_id is None:
-            params: JsonObject = {"model": self.model}
-            if self._approval_policy is not None:
-                params["approvalPolicy"] = self._approval_policy
-            if self._sandbox is not None:
-                params["sandbox"] = self._sandbox
-            result = self._transport.request("thread/start", params)
+            result = self._transport.request("thread/start", self._thread_start_params())
             thread = get_json_object(result, "thread")
             if thread is None:
                 msg = "thread/start response missing thread id"
@@ -425,7 +421,10 @@ class CodexSession:
         if direct_turn_id is not None:
             return direct_turn_id
 
-        return get_str(get_json_object(params, "turn") or {}, "id")
+        turn = get_nested_json_object(params, "turn")
+        if turn is None:
+            return None
+        return get_str(turn, "id")
 
     @staticmethod
     def _require_turn(result: JsonObject, *, error_message: str) -> JsonObject:
@@ -470,7 +469,7 @@ class CodexSession:
         if get_str(item, "type") != "agentMessage":
             return None
 
-        return CodexSession._text_from_delta_blocks(get_json_list(item, "delta"))
+        return CodexSession._text_from_delta_blocks(get_nested_json_list(item, "delta"))
 
     @staticmethod
     def _text_from_delta_blocks(delta_blocks: list[object] | None) -> str | None:
@@ -488,3 +487,11 @@ class CodexSession:
         if not text_parts:
             return None
         return "".join(text_parts)
+
+    def _thread_start_params(self) -> JsonObject:
+        params: JsonObject = {"model": self.model}
+        if self._approval_policy is not None:
+            params["approvalPolicy"] = self._approval_policy
+        if self._sandbox is not None:
+            params["sandbox"] = self._sandbox
+        return params
