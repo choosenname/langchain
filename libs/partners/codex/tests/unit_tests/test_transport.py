@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import inspect
 import json
 import threading
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import pytest
 
-from langchain_codex._types import AppServerProcess, JsonObject
 from langchain_codex.transport import CodexAppServerTransport
+
+if TYPE_CHECKING:
+    from langchain_codex._types import AppServerProcess, JsonObject
 
 
 class FakeStdin:
@@ -45,10 +48,12 @@ class FakeProcess:
         self,
         *,
         stdout_lines: list[str],
+        stderr_lines: list[str] | None = None,
         returncode: int | None = None,
     ) -> None:
         self.stdin = FakeStdin()
         self.stdout = FakeStdout(stdout_lines)
+        self.stderr = FakeStdout(stderr_lines or [])
         self._returncode = returncode
 
     def poll(self) -> int | None:
@@ -76,6 +81,7 @@ class ControlledProcess:
     def __init__(self) -> None:
         self.stdin = FakeStdin()
         self.stdout = ControlledStdout()
+        self.stderr = FakeStdout([])
 
     def poll(self) -> int | None:
         return None
@@ -87,9 +93,17 @@ class InspectableTransport(CodexAppServerTransport):
         self._reader_thread.join(timeout=1)
 
 
+def test_transport_defaults_to_no_request_timeout() -> None:
+    default_request_timeout = inspect.signature(CodexAppServerTransport.__init__).parameters[
+        "request_timeout"
+    ].default
+
+    assert default_request_timeout is None
+
+
 def test_transport_matches_out_of_order_responses_by_id() -> None:
     process = ControlledProcess()
-    transport = InspectableTransport(process=cast(AppServerProcess, process))
+    transport = InspectableTransport(process=cast("AppServerProcess", process))
 
     results: dict[str, JsonObject] = {}
     errors: list[BaseException] = []
@@ -149,7 +163,7 @@ def test_transport_routes_notifications() -> None:
         ]
     )
     transport = InspectableTransport(
-        process=cast(AppServerProcess, process),
+        process=cast("AppServerProcess", process),
         on_notification=seen.append,
     )
     transport.start()
@@ -172,7 +186,7 @@ def test_transport_routes_notifications_to_multiple_handlers() -> None:
         ]
     )
     transport = InspectableTransport(
-        process=cast(AppServerProcess, process),
+        process=cast("AppServerProcess", process),
         on_notification=seen_primary.append,
     )
     transport.add_notification_handler(seen_secondary.append)
@@ -201,7 +215,7 @@ def test_transport_raises_json_rpc_error_message() -> None:
             '{"jsonrpc": "2.0", "id": 1, "error": {"code": 123, "message": "Bad turn"}}\n',
         ]
     )
-    transport = InspectableTransport(process=cast(AppServerProcess, process))
+    transport = InspectableTransport(process=cast("AppServerProcess", process))
 
     with pytest.raises(RuntimeError, match="Bad turn"):
         transport.request("turn/start", {"threadId": "thr_1", "input": []})
@@ -209,7 +223,46 @@ def test_transport_raises_json_rpc_error_message() -> None:
 
 def test_transport_raises_when_process_exits_before_response() -> None:
     process = FakeProcess(stdout_lines=[], returncode=17)
-    transport = InspectableTransport(process=cast(AppServerProcess, process))
+    transport = InspectableTransport(process=cast("AppServerProcess", process))
 
     with pytest.raises(RuntimeError, match="exit code 17"):
+        transport.request("thread/start", {"model": "gpt-5.4"})
+
+
+def test_transport_includes_recent_stderr_in_exit_error() -> None:
+    process = FakeProcess(
+        stdout_lines=[],
+        stderr_lines=[
+            "ERROR failed to connect to websocket\n",
+            "DETAIL tcp open error\n",
+        ],
+        returncode=17,
+    )
+    transport = InspectableTransport(process=cast("AppServerProcess", process))
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"(?s)failed to connect to websocket.*tcp open error",
+    ):
+        transport.request("thread/start", {"model": "gpt-5.4"})
+
+
+def test_transport_raises_clear_error_for_server_requests() -> None:
+    process = FakeProcess(
+        stdout_lines=[
+            (
+                '{"jsonrpc": "2.0", "id": 99, '
+                '"method": "item/permissions/requestApproval", '
+                '"params": {"itemId": "item_1", "threadId": "thr_1", "turnId": "turn_1", '
+                '"permissions": {}, "reason": "Need approval"}}\n'
+            ),
+        ],
+        returncode=17,
+    )
+    transport = InspectableTransport(process=cast("AppServerProcess", process))
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"requires interactive handling.*item/permissions/requestApproval",
+    ):
         transport.request("thread/start", {"model": "gpt-5.4"})

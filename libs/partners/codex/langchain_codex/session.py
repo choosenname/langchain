@@ -12,7 +12,15 @@ from collections.abc import AsyncIterator, Callable, Iterator
 from dataclasses import dataclass, field
 from typing import Literal, Protocol
 
-from langchain_codex._types import JsonObject, TextInputItem, get_json_list, get_json_object, get_str
+from langchain_codex._types import (
+    JsonObject,
+    TextInputItem,
+    as_json_object,
+    get_json_list,
+    get_json_object,
+    get_nested_json_object,
+    get_str,
+)
 from langchain_codex.errors import CodexError
 
 
@@ -41,12 +49,26 @@ class _ActiveTurn:
     notification_condition: threading.Condition = field(default_factory=threading.Condition)
     buffered_notifications: list[JsonObject] = field(default_factory=_empty_notifications)
     remove_notification_handler: Callable[[], None] = field(default=lambda: None)
+    latest_thread_status: JsonObject | None = None
 
     def collect_notification(self, message: JsonObject) -> None:
         """Buffer a notification and wake any waiting turn consumer."""
         with self.notification_condition:
+            self._update_thread_status(message)
             self.buffered_notifications.append(message)
             self.notification_condition.notify_all()
+
+    def _update_thread_status(self, message: JsonObject) -> None:
+        if message.get("method") != "thread/status/changed":
+            return
+
+        params = get_json_object(message, "params")
+        if params is None or get_str(params, "threadId") != self.thread_id:
+            return
+
+        status = get_json_object(params, "status")
+        if status is not None:
+            self.latest_thread_status = status
 
 
 class _CodexTransport(Protocol):
@@ -67,6 +89,10 @@ class _CodexTransport(Protocol):
         """Install an additional notification handler and return a remover."""
         ...
 
+    def diagnostics(self) -> str | None:
+        """Return recent transport diagnostics when available."""
+        ...
+
 
 class CodexSession:
     """Own a single app-server connection and a persistent thread."""
@@ -82,17 +108,25 @@ class CodexSession:
         *,
         transport: _CodexTransport,
         model: str,
-        turn_timeout: float | None = 60.0,
+        approval_policy: str | None = "on-request",
+        sandbox: str | None = "workspace-write",
+        turn_timeout: float | None = None,
     ) -> None:
         """Initialize the session.
 
         Args:
             transport: App-server transport used for JSON-RPC communication.
             model: Model name used when creating the persistent thread.
+            approval_policy: Approval policy passed to `thread/start` when creating
+                the Codex thread.
+            sandbox: Sandbox mode passed to `thread/start` when creating the Codex
+                thread.
             turn_timeout: Maximum seconds to wait for turn completion events.
         """
         self._transport = transport
         self.model = model
+        self._approval_policy = approval_policy
+        self._sandbox = sandbox
         self._turn_timeout = turn_timeout
         self._started = False
         self._thread_id: str | None = None
@@ -212,7 +246,12 @@ class CodexSession:
     def _ensure_thread(self) -> str:
         """Create the app-server thread lazily and reuse it thereafter."""
         if self._thread_id is None:
-            result = self._transport.request("thread/start", {"model": self.model})
+            params: JsonObject = {"model": self.model}
+            if self._approval_policy is not None:
+                params["approvalPolicy"] = self._approval_policy
+            if self._sandbox is not None:
+                params["sandbox"] = self._sandbox
+            result = self._transport.request("thread/start", params)
             thread = get_json_object(result, "thread")
             if thread is None:
                 msg = "thread/start response missing thread id"
@@ -244,7 +283,7 @@ class CodexSession:
                     "input": input_items,
                 },
             )
-            turn = self._extract_turn(result)
+            turn = self._require_turn(result, error_message="turn/start response missing turn id")
         except Exception:
             active_turn.remove_notification_handler()
             raise
@@ -269,69 +308,135 @@ class CodexSession:
         )
         try:
             while not turn_completed:
-                with active_turn.notification_condition:
-                    while not active_turn.buffered_notifications and not turn_completed:
-                        remaining = (
-                            None
-                            if deadline is None
-                            else max(0.0, deadline - time.monotonic())
-                        )
-                        if remaining == 0.0:
-                            msg = (
-                                "Timed out waiting for Codex app-server to complete "
-                                f"turn {active_turn.turn_id!r}."
-                            )
-                            raise CodexError(msg)
-                        active_turn.notification_condition.wait(timeout=remaining)
-                        if not active_turn.buffered_notifications and deadline is not None:
-                            remaining = deadline - time.monotonic()
-                            if remaining <= 0:
-                                msg = (
-                                    "Timed out waiting for Codex app-server to complete "
-                                    f"turn {active_turn.turn_id!r}."
-                                )
-                                raise CodexError(msg)
-                    pending_notifications = active_turn.buffered_notifications[:]
-                    active_turn.buffered_notifications.clear()
+                pending_notifications = self._wait_for_turn_notifications(
+                    active_turn,
+                    deadline=deadline,
+                )
 
                 for message in pending_notifications:
                     if not self._is_turn_notification_for(message, active_turn.turn_id):
                         continue
 
-                    if message.get("method") == "turn/completed":
-                        completed_turn = self._extract_turn_from_notification(message)
-                        if completed_turn is not None:
-                            active_turn.turn = completed_turn
-                        turn_completed = True
+                    turn_completed = self._handle_turn_notification(
+                        active_turn,
+                        message,
+                        turn_completed=turn_completed,
+                    )
                     yield message
         finally:
             active_turn.remove_notification_handler()
 
+    def _wait_for_turn_notifications(
+        self,
+        active_turn: _ActiveTurn,
+        *,
+        deadline: float | None,
+    ) -> list[JsonObject]:
+        with active_turn.notification_condition:
+            while not active_turn.buffered_notifications:
+                self._wait_for_next_notification(active_turn, deadline=deadline)
+            pending_notifications = active_turn.buffered_notifications[:]
+            active_turn.buffered_notifications.clear()
+        return pending_notifications
+
+    def _wait_for_next_notification(
+        self,
+        active_turn: _ActiveTurn,
+        *,
+        deadline: float | None,
+    ) -> None:
+        remaining = self._remaining_turn_time(deadline)
+        if remaining == 0.0:
+            msg = self._turn_timeout_message(active_turn)
+            raise CodexError(msg)
+
+        active_turn.notification_condition.wait(timeout=remaining)
+        if active_turn.buffered_notifications:
+            return
+        updated_remaining = self._remaining_turn_time(deadline)
+        if updated_remaining is not None and updated_remaining <= 0:
+            msg = self._turn_timeout_message(active_turn)
+            raise CodexError(msg)
+
+    @staticmethod
+    def _remaining_turn_time(deadline: float | None) -> float | None:
+        if deadline is None:
+            return None
+        return max(0.0, deadline - time.monotonic())
+
+    def _handle_turn_notification(
+        self,
+        active_turn: _ActiveTurn,
+        message: JsonObject,
+        *,
+        turn_completed: bool,
+    ) -> bool:
+        if message.get("method") != "turn/completed":
+            return turn_completed
+
+        completed_turn = self._extract_turn_from_notification(message)
+        if completed_turn is not None:
+            active_turn.turn = completed_turn
+        return True
+
+    def _turn_timeout_message(self, active_turn: _ActiveTurn) -> str:
+        msg = (
+            "Timed out waiting for Codex app-server to complete turn "
+            f"{active_turn.turn_id!r}."
+        )
+        thread_status = self._thread_status_summary(active_turn.latest_thread_status)
+        if thread_status is not None:
+            msg += f" Last thread status: {thread_status}."
+        diagnostics = self._transport.diagnostics()
+        if diagnostics is None:
+            return msg
+        return f"{msg}\n\n{diagnostics}"
+
+    @staticmethod
+    def _thread_status_summary(status: JsonObject | None) -> str | None:
+        if status is None:
+            return None
+
+        status_type = get_str(status, "type")
+        if status_type != "active":
+            return status_type
+
+        active_flags = get_json_list(status, "activeFlags")
+        if not active_flags:
+            return status_type
+        rendered_flags = [flag for flag in active_flags if isinstance(flag, str)]
+        if not rendered_flags:
+            return status_type
+        return f"{status_type} ({', '.join(rendered_flags)})"
+
     @staticmethod
     def _is_turn_notification_for(message: JsonObject, turn_id: str) -> bool:
         """Return `True` when a notification belongs to the active turn."""
-        params = get_json_object(message, "params")
-        if params is None:
-            return False
-
-        turn = get_json_object(params, "turn")
-        if turn is None:
-            return False
-
-        return get_str(turn, "id") == turn_id
+        notification_turn_id = CodexSession._notification_turn_id(message)
+        return notification_turn_id == turn_id
 
     @staticmethod
-    def _extract_turn(result: JsonObject) -> JsonObject:
+    def _notification_turn_id(message: JsonObject) -> str | None:
+        params = get_json_object(message, "params")
+        if params is None:
+            return None
+
+        direct_turn_id = get_str(params, "turnId")
+        if direct_turn_id is not None:
+            return direct_turn_id
+
+        return get_str(get_json_object(params, "turn") or {}, "id")
+
+    @staticmethod
+    def _require_turn(result: JsonObject, *, error_message: str) -> JsonObject:
         """Return the active turn payload or raise if the response is malformed."""
         turn = get_json_object(result, "turn")
         if turn is None:
-            msg = "turn/start response missing turn id"
-            raise CodexError(msg)
+            raise CodexError(error_message)
 
         turn_id = get_str(turn, "id")
         if turn_id is None or not turn_id:
-            msg = "turn/start response missing turn id"
-            raise CodexError(msg)
+            raise CodexError(error_message)
 
         return turn
 
@@ -340,11 +445,7 @@ class CodexSession:
         message: JsonObject,
     ) -> JsonObject | None:
         """Return turn metadata from a notification when present."""
-        params = get_json_object(message, "params")
-        if params is None:
-            return None
-
-        turn = get_json_object(params, "turn")
+        turn = get_nested_json_object(message, "params", "turn")
         if turn is None:
             return None
 
@@ -357,21 +458,28 @@ class CodexSession:
     @staticmethod
     def _extract_text_delta(message: JsonObject) -> str | None:
         """Return streamed text from an `agentMessage` delta notification."""
-        params = get_json_object(message, "params")
-        if params is None:
+        if message.get("method") == "item/agentMessage/delta":
+            params = get_json_object(message, "params")
+            if params is None:
+                return None
+            return get_str(params, "delta")
+
+        item = get_nested_json_object(message, "params", "item")
+        if item is None:
+            return None
+        if get_str(item, "type") != "agentMessage":
             return None
 
-        item = get_json_object(params, "item")
-        if item is None or get_str(item, "type") != "agentMessage":
-            return None
+        return CodexSession._text_from_delta_blocks(get_json_list(item, "delta"))
 
-        delta = get_json_list(item, "delta")
-        if delta is None:
+    @staticmethod
+    def _text_from_delta_blocks(delta_blocks: list[object] | None) -> str | None:
+        if delta_blocks is None:
             return None
 
         text_parts: list[str] = []
-        for raw_block in delta:
-            block = get_json_object({"block": raw_block}, "block")
+        for raw_block in delta_blocks:
+            block = as_json_object(raw_block)
             if block is None or get_str(block, "type") != "text":
                 continue
             text = get_str(block, "text")

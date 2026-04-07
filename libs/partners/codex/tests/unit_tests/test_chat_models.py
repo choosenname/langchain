@@ -2,17 +2,20 @@ from __future__ import annotations
 
 import asyncio
 import io
+import subprocess
 import threading
 import time
 from collections.abc import AsyncIterator, Callable, Iterator
-from typing import Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 import pytest
 from langchain_core.messages import AIMessageChunk, HumanMessage, ToolMessage
 
-from langchain_codex._types import JsonObject, TextInputItem
 from langchain_codex import ChatCodex
 from langchain_codex.session import CodexSession, TurnDelta
+
+if TYPE_CHECKING:
+    from langchain_codex._types import JsonObject, TextInputItem
 
 
 class SessionLike(Protocol):
@@ -134,6 +137,147 @@ class FakeSession:
         )
 
 
+class DocSchemaSession:
+    def __init__(self, reply_text: str) -> None:
+        self.reply_text = reply_text
+
+    def run_turn(self, input_items: list[TextInputItem]) -> JsonObject:
+        _ = input_items
+        return {
+            "thread": {"id": "thr_123"},
+            "turn": {"id": "turn_123", "status": "completed"},
+            "events": [
+                {
+                    "jsonrpc": "2.0",
+                    "method": "item/completed",
+                    "params": {
+                        "turn": {"id": "turn_123"},
+                        "item": {
+                            "id": "msg_123",
+                            "type": "agentMessage",
+                            "text": self.reply_text,
+                            "phase": "final_answer",
+                        },
+                    },
+                },
+                {
+                    "jsonrpc": "2.0",
+                    "method": "turn/completed",
+                    "params": {
+                        "turn": {"id": "turn_123", "status": "completed"},
+                    },
+                },
+            ],
+        }
+
+    def stream_turn(self, input_items: list[TextInputItem]) -> Iterator[TurnDelta]:
+        _ = input_items
+        msg = "stream_turn should not be called in this test"
+        raise AssertionError(msg)
+
+    async def astream_turn(
+        self,
+        input_items: list[TextInputItem],
+    ) -> AsyncIterator[TurnDelta]:
+        _ = input_items
+        msg = "astream_turn should not be called in this test"
+        raise AssertionError(msg)
+        yield TurnDelta(text="")
+
+
+class DocSchemaDeltaSession:
+    def __init__(self, reply_text: str) -> None:
+        self.reply_text = reply_text
+
+    def run_turn(self, input_items: list[TextInputItem]) -> JsonObject:
+        _ = input_items
+        return {
+            "thread": {"id": "thr_123"},
+            "turn": {"id": "turn_123", "status": "completed"},
+            "events": [
+                {
+                    "jsonrpc": "2.0",
+                    "method": "item/agentMessage/delta",
+                    "params": {
+                        "turnId": "turn_123",
+                        "delta": self.reply_text,
+                    },
+                },
+                {
+                    "jsonrpc": "2.0",
+                    "method": "turn/completed",
+                    "params": {
+                        "turn": {"id": "turn_123", "status": "completed"},
+                    },
+                },
+            ],
+        }
+
+    def stream_turn(self, input_items: list[TextInputItem]) -> Iterator[TurnDelta]:
+        _ = input_items
+        msg = "stream_turn should not be called in this test"
+        raise AssertionError(msg)
+
+    async def astream_turn(
+        self,
+        input_items: list[TextInputItem],
+    ) -> AsyncIterator[TurnDelta]:
+        _ = input_items
+        msg = "astream_turn should not be called in this test"
+        raise AssertionError(msg)
+        yield TurnDelta(text="")
+
+
+class LegacyItemUpdatedSession:
+    def __init__(self, reply_text_parts: list[str]) -> None:
+        self.reply_text_parts = reply_text_parts
+
+    def run_turn(self, input_items: list[TextInputItem]) -> JsonObject:
+        _ = input_items
+        events: list[JsonObject] = [
+            {
+                "jsonrpc": "2.0",
+                "method": "item/updated",
+                "params": {
+                    "turn": {"id": "turn_123"},
+                    "item": {
+                        "type": "agentMessage",
+                        "delta": [{"type": "text", "text": part}],
+                    },
+                },
+            }
+            for part in self.reply_text_parts
+        ]
+        events.append(
+            {
+                "jsonrpc": "2.0",
+                "method": "turn/completed",
+                "params": {
+                    "turn": {"id": "turn_123", "status": "completed"},
+                },
+            }
+        )
+        return {
+            "thread": {"id": "thr_123"},
+            "turn": {"id": "turn_123", "status": "completed"},
+            "events": events,
+        }
+
+    def stream_turn(self, input_items: list[TextInputItem]) -> Iterator[TurnDelta]:
+        _ = input_items
+        msg = "stream_turn should not be called in this test"
+        raise AssertionError(msg)
+
+    async def astream_turn(
+        self,
+        input_items: list[TextInputItem],
+    ) -> AsyncIterator[TurnDelta]:
+        _ = input_items
+        msg = "astream_turn should not be called in this test"
+        raise AssertionError(msg)
+        yield TurnDelta(text="")
+
+
 class DelayedStreamTransport:
     def __init__(self) -> None:
         self._thread_id = "thr_123"
@@ -165,6 +309,9 @@ class DelayedStreamTransport:
     def notify(self, method: str, params: JsonObject) -> None:
         _ = method
         _ = params
+
+    def diagnostics(self) -> str | None:
+        return None
 
     def _emit_turn_notifications(self) -> None:
         for text in ["A", "B"]:
@@ -220,6 +367,7 @@ class DummyPopen:
         self.args = args
         self.stdin = io.StringIO()
         self.stdout = io.StringIO()
+        self.stderr = io.StringIO()
 
 
 def _make_model(
@@ -236,11 +384,11 @@ def _make_model(
 
 
 def _message_metadata(message: object) -> dict[str, object]:
-    return cast(dict[str, object], getattr(message, "response_metadata"))
+    return cast("dict[str, object]", cast("Any", message).response_metadata)
 
 
 def _message_content(message: object) -> str:
-    content = getattr(message, "content")
+    content = cast("Any", message).content
     assert isinstance(content, str)
     return content
 
@@ -263,9 +411,33 @@ def test_invoke_returns_ai_message_with_codex_metadata() -> None:
     assert metadata["thread_id"] == "thr_123"
     assert metadata["turn_id"] == "turn_123"
     assert metadata["turn_status"] == "completed"
-    assert session.input_items_calls == [
-        [{"type": "text", "text": "Human: Say hi"}],
-    ]
+
+
+def test_invoke_reads_completed_agent_message_text_from_app_server_doc_schema() -> None:
+    session = DocSchemaSession("Hello from item/completed")
+    model = _make_model(session_factory=lambda: session)
+
+    result = model.invoke("Say hi")
+
+    assert _message_content(result) == "Hello from item/completed"
+
+
+def test_invoke_reads_agent_message_delta_text_from_app_server_doc_schema() -> None:
+    session = DocSchemaDeltaSession("Hello from item/agentMessage/delta")
+    model = _make_model(session_factory=lambda: session)
+
+    result = model.invoke("Say hi")
+
+    assert _message_content(result) == "Hello from item/agentMessage/delta"
+
+
+def test_invoke_reads_legacy_item_updated_text_deltas() -> None:
+    session = LegacyItemUpdatedSession(["Hello", " from", " item/updated"])
+    model = _make_model(session_factory=lambda: session)
+
+    result = model.invoke("Say hi")
+
+    assert _message_content(result) == "Hello from item/updated"
 
 
 @pytest.mark.asyncio
@@ -320,9 +492,9 @@ def test_build_session_uses_codex_command_prefix(
         stderr: Any,
         text: bool,
     ) -> DummyPopen:
-        _ = stdin
-        _ = stdout
-        _ = stderr
+        assert stdin is subprocess.PIPE
+        assert stdout is subprocess.PIPE
+        assert stderr is subprocess.PIPE
         assert text is True
         popen_calls.append(args)
         return DummyPopen(args)
@@ -340,9 +512,13 @@ def test_build_session_uses_codex_command_prefix(
 
     model = ChatCodexHarness(model="gpt-5.4", codex_command="ai-creds run codex")
 
-    model.build_session_for_test()
+    built_session = cast("dict[str, object]", model.build_session_for_test())
 
     assert popen_calls == [["ai-creds", "run", "codex", "app-server"]]
+    assert model.approval_policy == "on-request"
+    assert model.sandbox == "workspace-write"
+    assert built_session["approval_policy"] == "on-request"
+    assert built_session["sandbox"] == "workspace-write"
 
 
 def test_build_session_uses_default_codex_binary(
@@ -362,9 +538,9 @@ def test_build_session_uses_default_codex_binary(
         stderr: Any,
         text: bool,
     ) -> DummyPopen:
-        _ = stdin
-        _ = stdout
-        _ = stderr
+        assert stdin is subprocess.PIPE
+        assert stdout is subprocess.PIPE
+        assert stderr is subprocess.PIPE
         assert text is True
         popen_calls.append(args)
         return DummyPopen(args)
@@ -382,9 +558,17 @@ def test_build_session_uses_default_codex_binary(
 
     model = ChatCodexHarness(model="gpt-5.4")
 
-    model.build_session_for_test()
+    built_session = cast("dict[str, object]", model.build_session_for_test())
 
     assert popen_calls == [["codex", "app-server"]]
+    assert model.request_timeout is None
+    assert model.turn_timeout is None
+    assert cast("dict[str, object]", built_session["transport"])["request_timeout"] is None
+    assert built_session["turn_timeout"] is None
+    assert model.approval_policy == "on-request"
+    assert model.sandbox == "workspace-write"
+    assert built_session["approval_policy"] == "on-request"
+    assert built_session["sandbox"] == "workspace-write"
 
 
 def test_build_session_rejects_empty_codex_command() -> None:

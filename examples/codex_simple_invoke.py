@@ -9,7 +9,10 @@ def main() -> None:
         model="gpt-5.4",
         codex_command="ai-creds run codex",
     )
-    response = model.invoke("Summarize this repository in one sentence.")
+    try:
+        response = model.invoke("Summarize this repository in one sentence.")
+    except RuntimeError as err:
+        raise SystemExit(f"Codex example failed: {err}") from err
     print(response.content)
 
 

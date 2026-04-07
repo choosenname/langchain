@@ -7,7 +7,7 @@ import shutil
 import subprocess
 import threading
 from collections.abc import AsyncIterator, Callable, Iterator
-from typing import Any, Protocol, cast
+from typing import Any, Literal, Protocol, cast
 
 from langchain_core.callbacks import (
     AsyncCallbackManagerForLLMRun,
@@ -29,6 +29,8 @@ from langchain_codex._types import (
     as_json_object,
     get_json_list,
     get_json_object,
+    get_nested_json_object,
+    get_nested_str,
     get_str,
 )
 from langchain_codex.errors import CodexError, CodexInputError
@@ -52,39 +54,83 @@ class _CodexSessionLike(Protocol):
         """Asynchronously stream text deltas for one app-server turn."""
         ...
 
-
-def _get_nested_string(payload: JsonObject, *path: str) -> str | None:
-    value: object = payload
-    for key in path:
-        nested = as_json_object(value)
-        if nested is None:
-            return None
-        value = nested.get(key)
-    return value if isinstance(value, str) else None
-
-
-def _extract_turn_text(turn: JsonObject) -> str:
-    text_chunks: list[str] = []
+def _iter_turn_messages(turn: JsonObject) -> Iterator[JsonObject]:
     events = get_json_list(turn, "events")
     if events is None:
-        return ""
+        return
 
     for raw_message in events:
         message = as_json_object(raw_message)
-        if message is None:
-            continue
+        if message is not None:
+            yield message
+
+
+def _completed_agent_message_text(message: JsonObject) -> str | None:
+    if message.get("method") != "item/completed":
+        return None
+
+    item = get_nested_json_object(message, "params", "item")
+    if item is None or get_str(item, "type") != "agentMessage":
+        return None
+    return get_str(item, "text")
+
+
+def _agent_message_delta_text(message: JsonObject) -> str | None:
+    if message.get("method") == "item/agentMessage/delta":
         params = get_json_object(message, "params")
         if params is None:
-            continue
-        event = get_json_object(params, "event")
-        if event is None:
-            continue
-        if get_str(event, "type") != "text":
-            continue
-        text = get_str(event, "text")
-        if text is not None:
-            text_chunks.append(text)
+            return None
+        return get_str(params, "delta")
 
+    item = get_nested_json_object(message, "params", "item")
+    if item is None or get_str(item, "type") != "agentMessage":
+        return None
+
+    delta_blocks = get_json_list(item, "delta")
+    if delta_blocks is None:
+        return None
+
+    text_parts: list[str] = []
+    for raw_block in delta_blocks:
+        block = as_json_object(raw_block)
+        if block is None or get_str(block, "type") != "text":
+            continue
+        text = get_str(block, "text")
+        if text is not None:
+            text_parts.append(text)
+    if not text_parts:
+        return None
+    return "".join(text_parts)
+
+
+def _legacy_turn_output_text(message: JsonObject) -> str | None:
+    event = get_nested_json_object(message, "params", "event")
+    if event is None or get_str(event, "type") != "text":
+        return None
+    return get_str(event, "text")
+
+
+def _extract_turn_text(turn: JsonObject) -> str:
+    completed_agent_messages: list[str] = []
+    item_deltas: list[str] = []
+    text_chunks: list[str] = []
+    for message in _iter_turn_messages(turn):
+        completed_message = _completed_agent_message_text(message)
+        if completed_message is not None:
+            completed_agent_messages.append(completed_message)
+
+        delta_text = _agent_message_delta_text(message)
+        if delta_text is not None:
+            item_deltas.append(delta_text)
+
+        turn_output_text = _legacy_turn_output_text(message)
+        if turn_output_text is not None:
+            text_chunks.append(turn_output_text)
+
+    if completed_agent_messages:
+        return completed_agent_messages[-1]
+    if item_deltas:
+        return "".join(item_deltas)
     return "".join(text_chunks)
 
 
@@ -102,17 +148,34 @@ def _response_metadata_from_delta(
         metadata["thread_id"] = thread_id
     turn = delta.turn
     if turn is not None:
-        turn_id = _get_nested_string({"turn": turn}, "turn", "id")
+        turn_id = get_nested_str({"turn": turn}, "turn", "id")
         if turn_id is not None:
             metadata["turn_id"] = turn_id
-        turn_status = _get_nested_string(
-            {"turn": turn},
-            "turn",
-            "status",
-        )
+        turn_status = get_nested_str({"turn": turn}, "turn", "status")
         if turn_status is not None:
             metadata["turn_status"] = turn_status
     return metadata
+
+
+def _message_role_name(message: BaseMessage) -> str:
+    if message.type == "human":
+        return "Human"
+    if message.type == "ai":
+        return "AI"
+    if message.type == "system":
+        return "System"
+
+    msg = f"ChatCodex does not support {message.type} messages."
+    raise CodexInputError(msg)
+
+
+def _render_message(message: BaseMessage) -> str:
+    typed_message = cast("Any", message)
+    content = cast("object", typed_message.content)
+    if not isinstance(content, str):
+        msg = "ChatCodex only supports string message content."
+        raise CodexInputError(msg)
+    return f"{_message_role_name(message)}: {content}"
 
 
 class ChatCodex(BaseChatModel):
@@ -121,8 +184,14 @@ class ChatCodex(BaseChatModel):
     model_name: str = Field(alias="model")
     codex_binary: str = "codex"
     codex_command: str | None = None
-    request_timeout: float | None = 30.0
-    turn_timeout: float | None = 60.0
+    request_timeout: float | None = None
+    turn_timeout: float | None = None
+    approval_policy: Literal["untrusted", "on-failure", "on-request", "never"] = (
+        "on-request"
+    )
+    sandbox: Literal["read-only", "workspace-write", "danger-full-access"] = (
+        "workspace-write"
+    )
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -144,11 +213,10 @@ class ChatCodex(BaseChatModel):
 
     def _build_session(self) -> CodexSession:
         command = self._app_server_command()
-        executable = command[0]
-        if shutil.which(executable) is None:
+        if shutil.which(command[0]) is None:
             msg = (
                 "Unable to launch Codex app-server because "
-                f"{executable!r} is not available on PATH."
+                f"{command[0]!r} is not available on PATH."
             )
             raise CodexError(msg)
 
@@ -156,20 +224,22 @@ class ChatCodex(BaseChatModel):
             command,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
             text=True,
         )
-        if process.stdin is None or process.stdout is None:
+        if process.stdin is None or process.stdout is None or process.stderr is None:
             msg = "Codex app-server process did not expose stdio pipes."
             raise CodexError(msg)
         self._process = process
         transport = CodexAppServerTransport(
-            process=cast(AppServerProcess, process),
+            process=cast("AppServerProcess", process),
             request_timeout=self.request_timeout,
         )
         return CodexSession(
             transport=transport,
             model=self.model_name,
+            approval_policy=self.approval_policy,
+            sandbox=self.sandbox,
             turn_timeout=self.turn_timeout,
         )
 
@@ -190,26 +260,28 @@ class ChatCodex(BaseChatModel):
         return [*command, "app-server"]
 
     def _to_input_items(self, messages: list[BaseMessage]) -> list[TextInputItem]:
-        rendered_messages: list[str] = []
-        for message in messages:
-            content = getattr(message, "content")
-            if not isinstance(content, str):
-                msg = "ChatCodex only supports string message content."
-                raise CodexInputError(msg)
-
-            if message.type == "human":
-                role = "Human"
-            elif message.type == "ai":
-                role = "AI"
-            elif message.type == "system":
-                role = "System"
-            else:
-                msg = f"ChatCodex does not support {message.type} messages."
-                raise CodexInputError(msg)
-
-            rendered_messages.append(f"{role}: {content}")
-
+        rendered_messages = [_render_message(message) for message in messages]
         return [{"type": "text", "text": "\n".join(rendered_messages)}]
+
+    def _chat_result_metadata(self, turn: JsonObject) -> JsonObject:
+        return {
+            "model_provider": "codex",
+            "model": self.model_name,
+            "thread_id": get_nested_str(turn, "thread", "id"),
+            "turn_id": get_nested_str(turn, "turn", "id"),
+            "turn_status": get_nested_str(turn, "turn", "status"),
+        }
+
+    def _generation_chunk_from_delta(self, delta: TurnDelta) -> ChatGenerationChunk:
+        message_chunk = AIMessageChunk(
+            content=delta.text,
+            response_metadata=_response_metadata_from_delta(
+                delta,
+                model_name=self.model_name,
+            ),
+            chunk_position=delta.chunk_position,
+        )
+        return ChatGenerationChunk(message=message_chunk)
 
     def _generate(
         self,
@@ -239,13 +311,7 @@ class ChatCodex(BaseChatModel):
         turn = self._session().run_turn(self._to_input_items(messages))
         message = AIMessage(
             content=_extract_turn_text(turn),
-            response_metadata={
-                "model_provider": "codex",
-                "model": self.model_name,
-                "thread_id": _get_nested_string(turn, "thread", "id"),
-                "turn_id": _get_nested_string(turn, "turn", "id"),
-                "turn_status": _get_nested_string(turn, "turn", "status"),
-            },
+            response_metadata=self._chat_result_metadata(turn),
         )
         return ChatResult(generations=[ChatGeneration(message=message)])
 
@@ -259,15 +325,7 @@ class ChatCodex(BaseChatModel):
         _ = stop
         _ = kwargs
         for delta in self._session().stream_turn(self._to_input_items(messages)):
-            message_chunk = AIMessageChunk(
-                content=delta.text,
-                response_metadata=_response_metadata_from_delta(
-                    delta,
-                    model_name=self.model_name,
-                ),
-                chunk_position=delta.chunk_position,
-            )
-            generation_chunk = ChatGenerationChunk(message=message_chunk)
+            generation_chunk = self._generation_chunk_from_delta(delta)
             if run_manager is not None and delta.text:
                 run_manager.on_llm_new_token(delta.text, chunk=generation_chunk)
             yield generation_chunk
@@ -282,15 +340,7 @@ class ChatCodex(BaseChatModel):
         _ = stop
         _ = kwargs
         async for delta in self._session().astream_turn(self._to_input_items(messages)):
-            message_chunk = AIMessageChunk(
-                content=delta.text,
-                response_metadata=_response_metadata_from_delta(
-                    delta,
-                    model_name=self.model_name,
-                ),
-                chunk_position=delta.chunk_position,
-            )
-            generation_chunk = ChatGenerationChunk(message=message_chunk)
+            generation_chunk = self._generation_chunk_from_delta(delta)
             if run_manager is not None and delta.text:
                 await run_manager.on_llm_new_token(delta.text, chunk=generation_chunk)
             yield generation_chunk
@@ -307,4 +357,6 @@ class ChatCodex(BaseChatModel):
             "codex_command": self.codex_command,
             "request_timeout": self.request_timeout,
             "turn_timeout": self.turn_timeout,
+            "approval_policy": self.approval_policy,
+            "sandbox": self.sandbox,
         }
