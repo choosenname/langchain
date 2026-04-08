@@ -46,6 +46,61 @@ If you're looking for more advanced customization or agent orchestration, check 
 > [!TIP]
 > For developing, debugging, and deploying AI agents and LLM applications, see [LangSmith](https://docs.langchain.com/langsmith/home).
 
+## Where to Contribute
+
+If you are new to this monorepo, start with `AGENTS.md`, `libs/README.md`, and the `README.md` plus `pyproject.toml` for the package you expect to touch. In this checkout, the repo-local `docs/` directory is empty, so contributor guidance currently lives in these Markdown files and in package-local `Makefile` targets.
+
+- `libs/core`: Base abstractions and shared runtime primitives. Edit this for changes to runnables, messages, prompts, tools, callbacks, language model interfaces, or serialization.
+- `libs/langchain_v1`: The actively maintained `langchain` package. Edit this for new top-level agent, chat model, embedding, or tool entrypoints built on current APIs.
+- `libs/langchain`: `langchain-classic`, the legacy compatibility package. Edit this for deprecated imports, backward-compatibility shims, and legacy chain behavior that still needs maintenance.
+- `libs/partners`: Provider integrations such as OpenAI and Anthropic. Edit the specific partner package when behavior depends on an external provider SDK or API.
+- `libs/standard-tests`: Shared conformance tests for integrations. Edit this when changing the expected contract for chat models, embeddings, tools, retrievers, vector stores, or similar interfaces.
+- `libs/text-splitters`: Standalone text chunking utilities. Edit this for document splitting logic and related tests.
+- `libs/model-profiles`: The CLI and generated-profile workflow for model capability data. Edit this when changing how profile data is fetched, generated, or refreshed for partner packages.
+
+## Verification by Package
+
+Run verification from the package directory you changed. The commands below are package-local; there is no single root verification command in this checkout.
+
+### Offline unit tests
+
+- `libs/core`: `cd libs/core && make lint && make type && make test`
+- `libs/langchain`: `cd libs/langchain && make lint && make type && make test`
+- `libs/langchain_v1`: `cd libs/langchain_v1 && make lint && make type && make test_fast`
+  Use `make test` only when you need the Docker-backed agent test services; `make test_fast` skips those services and is the safer default for small refactors.
+- `libs/standard-tests`: `cd libs/standard-tests && make lint && make type && make test`
+- `libs/text-splitters`: `cd libs/text-splitters && make lint && make type && make test`
+- `libs/model-profiles`: `cd libs/model-profiles && make lint && make type && make test`
+- `libs/partners/openai`: `cd libs/partners/openai && make lint && make type && make test`
+  `make test` bootstraps a local `tiktoken_cache/` by downloading tokenizer files before running socket-disabled unit tests.
+- `libs/partners/anthropic`: `cd libs/partners/anthropic && make lint && make type && make test`
+
+### Integration tests
+
+- `libs/langchain`: `cd libs/langchain && make integration_tests`
+- `libs/langchain_v1`: `cd libs/langchain_v1 && make integration_tests`
+- `libs/standard-tests`: `cd libs/standard-tests && make integration_tests`
+- `libs/text-splitters`: `cd libs/text-splitters && make integration_tests`
+- `libs/model-profiles`: `cd libs/model-profiles && make integration_tests`
+- `libs/partners/openai`: `cd libs/partners/openai && make integration_tests`
+- `libs/partners/anthropic`: `cd libs/partners/anthropic && make integration_tests`
+
+### Extra prerequisites to call out in review
+
+- `libs/langchain_v1`: full `make test`, `make test_watch`, and `make extended_tests` start Docker services for agent tests via `make start_services`.
+- `libs/partners/openai`: unit tests populate `tiktoken_cache/` with tokenizer data before running offline.
+- `libs/model-profiles`: `make refresh-profiles` is separate from normal test verification and requires network access.
+
+## Public API Refactor Checklist
+
+Use this checklist before changing exported symbols, compatibility shims, or import paths:
+
+- Inspect the package `__init__.py` first. In this repo, files such as `libs/core/langchain_core/__init__.py`, `libs/langchain_v1/langchain/__init__.py`, and `libs/langchain/langchain_classic/__init__.py` define or expose public entrypoints.
+- Check the existing tests and examples that exercise the symbol before moving, renaming, or removing it.
+- Do not change function or class signatures unless the change is explicitly approved. Adding, removing, renaming, or reordering parameters should be treated as a breaking change until reviewed.
+- Prefer incremental refactors that preserve the current import path and behavior, then add focused tests around the compatibility boundary you touched.
+- Stop and ask for additional review before proceeding if the change affects exported imports, deprecation behavior, compatibility layers, generated profile outputs, or anything that could break user code that worked last week.
+
 ## LangChain ecosystem
 
 While the LangChain framework can be used standalone, it also integrates seamlessly with any LangChain product, giving developers a full suite of tools when building LLM applications.

@@ -1,0 +1,18 @@
+{
+  "include": [
+    "."
+  ],
+  "exclude": [
+    ".venv",
+    "__pycache__"
+  ],
+  "executionEnvironments": [
+    {
+      "root": ".",
+      "extraPaths": [
+        "../libs/partners/codex",
+        "../libs/core"
+      ]
+    }
+  ]
+}

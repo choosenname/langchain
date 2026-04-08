@@ -32,6 +32,20 @@ langchain/
 - **Integration layer** (`partners/`): Third-party service integrations. Note that this monorepo is not exhaustive of all LangChain integrations; some are maintained in separate repos, such as `langchain-ai/langchain-google` and `langchain-ai/langchain-aws`. Usually these repos are cloned at the same level as this monorepo, so if needed, you can refer to their code directly by navigating to `../langchain-google/` from this monorepo.
 - **Testing layer** (`standard-tests/`): Standardized integration tests for partner integrations
 
+### Quick package map
+
+Use this map to decide where a change belongs before editing code:
+
+- `libs/core`: shared abstractions and runtime primitives such as runnables, messages, prompts, tools, callbacks, tracing, and serialization.
+- `libs/langchain_v1`: the actively maintained `langchain` package; use this for current high-level agent, chat model, embedding, and tool APIs.
+- `libs/langchain`: `langchain-classic`; use this for legacy behavior, deprecation paths, and backward-compatibility shims.
+- `libs/partners`: provider-specific integrations; edit the partner package that owns the external SDK or API behavior you are changing.
+- `libs/standard-tests`: shared conformance tests; edit this when the expected integration contract changes across providers.
+- `libs/text-splitters`: standalone document chunking and splitter behavior.
+- `libs/model-profiles`: profile refresh tooling and generated model capability data used by partner packages.
+
+Assumption for this checkout: the repo-local `docs/` directory is currently empty, so contributor-facing guidance is expected to live in `README.md`, `AGENTS.md`, and package-local `README.md`/`Makefile` files unless the maintainers point to a different docs source.
+
 ### Development tools & commands
 
 - `uv` – Fast Python package installer and resolver (replaces pip/poetry)
@@ -112,6 +126,14 @@ You should warn the developer for any function signature changes, regardless of 
 - Mark experimental features clearly with docstring warnings (using MkDocs Material admonitions, like `!!! warning`)
 
 Ask: "Would this change break someone's code if they used it last week?"
+
+**Reviewer checklist for incremental refactors touching public APIs:**
+
+- Inspect the package `__init__.py` first. In this repo, files such as `libs/core/langchain_core/__init__.py`, `libs/langchain_v1/langchain/__init__.py`, and `libs/langchain/langchain_classic/__init__.py` define or expose public entrypoints.
+- Check existing tests and examples before moving, renaming, or removing an exported symbol.
+- Do not change function or class signatures unless the change is explicitly approved. Treat added, removed, renamed, or reordered parameters as breaking until reviewed.
+- Prefer incremental refactors that preserve current import paths and compatibility behavior, then add focused tests around the boundary you changed.
+- Stop and wait for additional review if the change affects exported imports, deprecation behavior, compatibility layers, generated profile outputs, or any behavior that could break user code that worked last week.
 
 ### Code quality standards
 
