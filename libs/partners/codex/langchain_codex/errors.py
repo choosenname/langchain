@@ -13,3 +13,11 @@ class CodexInputError(CodexError):
 
 class CodexTransportError(CodexError):
     """Raised when the Codex app-server transport fails."""
+
+
+class CodexProtocolError(CodexError):
+    """Raised when the Codex app-server payload shape is invalid."""
+
+
+class CodexServerRequestError(CodexError):
+    """Raised when a server-initiated request cannot be handled."""

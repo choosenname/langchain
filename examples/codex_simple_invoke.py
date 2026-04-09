@@ -1,6 +1,6 @@
 """Minimal synchronous example for `ChatCodex`."""
 
-from langchain_codex.chat_models import ChatCodex
+from langchain_codex import ChatCodex
 
 LIVE_PREVIEW_MAX_CHARS = 120
 FINAL_PREVIEW_MAX_LINES = 6
@@ -38,9 +38,9 @@ def main() -> None:
     """Run one synchronous Codex prompt and print the reply."""
     model = ChatCodex(
         model="gpt-5.4",
-        codex_command="ai-creds run codex",
+        launch_command=("ai-creds", "run", "codex", "app-server"),
         approval_policy="never",
-        sandbox="danger-full-access",
+        sandbox_policy={"type": "dangerFullAccess"},
     )
     try:
         chunks: list[str] = []

@@ -6,7 +6,7 @@ import json
 from typing import Any
 
 from langchain_core.messages import AIMessage
-from langchain_codex.chat_models import ChatCodex
+from langchain_codex import ChatCodex
 
 MAX_REVIEW_ATTEMPTS = 3
 PREVIEW_MAX_LINES = 8
@@ -390,9 +390,9 @@ def main() -> None:
     """Run a multi-turn Codex workflow with per-step review controls."""
     model = ChatCodex(
         model="gpt-5.4",
-        codex_command="ai-creds run codex",
+        launch_command=("ai-creds", "run", "codex", "app-server"),
         approval_policy="never",
-        sandbox="danger-full-access",
+        sandbox_policy={"type": "dangerFullAccess"},
     )
     try:
         analysis = model.invoke(build_repository_analysis_prompt())
