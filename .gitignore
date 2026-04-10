@@ -166,3 +166,5 @@ virtualenv/
 scratch/
 
 .langgraph_api/
+
+.worktrees/
