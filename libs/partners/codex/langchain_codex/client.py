@@ -12,7 +12,11 @@ from langchain_codex.session import CodexSession
 from langchain_codex.transport.stdio import StdioCodexTransport
 
 if TYPE_CHECKING:
-    from langchain_codex.types import CodexClientConfig
+    from langchain_codex.types import (
+        CodexApprovalDecision,
+        CodexApprovalRequest,
+        CodexClientConfig,
+    )
 
 
 class CodexClient:
@@ -34,11 +38,23 @@ class CodexClient:
         self._transport_factory = transport_factory
         self._transport: Any | None = None
 
-    def create_session(self) -> CodexSession:
-        """Create a session bound to this client configuration."""
+    def create_session(
+        self,
+        *,
+        approval_handler: Callable[[CodexApprovalRequest], CodexApprovalDecision] | None = None,
+        thread_id: str | None = None,
+    ) -> CodexSession:
+        """Create a session bound to this client configuration.
+
+        Args:
+            approval_handler: Optional blocking handler for app-server approval requests.
+            thread_id: Optional existing thread id to continue.
+        """
         return CodexSession(
             transport=self._ensure_transport(),
             config=self.config,
+            approval_handler=approval_handler,
+            thread_id=thread_id,
         )
 
     def request(self, method: str, params: dict[str, object]) -> dict[str, object]:

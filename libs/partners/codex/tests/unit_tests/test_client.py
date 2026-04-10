@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import threading
+from collections.abc import Callable
 from typing import cast
 
 from langchain_codex import CodexClient, CodexSession
@@ -56,6 +57,82 @@ def test_provider_exports_define_approval_and_turn_models() -> None:
 def test_package_exports_provider_native_client_surface() -> None:
     assert CodexClient is not None
     assert CodexSession is not None
+
+
+def test_client_create_session_accepts_approval_handler_and_thread_id() -> None:
+    config = CodexClientConfig(
+        launch_command=("ai-creds", "run", "codex", "app-server"),
+        model="gpt-5.4",
+        approval_policy="on-request",
+    )
+
+    def approval_handler(request: CodexApprovalRequest) -> CodexApprovalDecision:
+        assert request.method
+        return CodexApprovalDecision(decision="accept")
+
+    class FakeTransport:
+        def __init__(self) -> None:
+            self.requests: list[tuple[str, dict[str, object]]] = []
+            self.notification_handler: Callable[[dict[str, object]], None] | None = None
+            self.server_request_handler: Callable[[object], object | None] | None = None
+
+        def request(self, method: str, params: dict[str, object]) -> dict[str, object]:
+            self.requests.append((method, params))
+            if method == "turn/start":
+                if self.notification_handler is None:
+                    msg = "notification handler was not registered"
+                    raise AssertionError(msg)
+                self.notification_handler(
+                    {
+                        "method": "turn/completed",
+                        "params": {"turn": {"id": "turn_1", "status": "completed"}},
+                    }
+                )
+                return {"turn": {"id": "turn_1", "status": "running"}}
+            return {}
+
+        def notify(self, method: str, params: dict[str, object]) -> None:
+            return None
+
+        def add_notification_handler(
+            self,
+            handler: Callable[[dict[str, object]], None],
+        ) -> Callable[[], None]:
+            self.notification_handler = handler
+            return lambda: None
+
+        def add_server_request_handler(
+            self,
+            handler: Callable[[object], object | None],
+        ) -> Callable[[], None]:
+            self.server_request_handler = handler
+            return lambda: None
+
+    fake_transport = FakeTransport()
+    client = CodexClient(config, transport_factory=lambda _config: fake_transport)
+
+    session = client.create_session(
+        approval_handler=approval_handler,
+        thread_id="thr_existing",
+    )
+
+    assert isinstance(session, CodexSession)
+    assert fake_transport.server_request_handler is not None
+    response = fake_transport.server_request_handler(
+        {
+            "id": 7,
+            "method": "item/commandExecution/requestApproval",
+            "params": {"threadId": "thr_existing", "turnId": "turn_1"},
+        }
+    )
+    assert response == {"decision": "accept"}
+
+    session.run_turn([{"type": "text", "text": "continue the docs"}])
+
+    turn_start_params = [
+        params for method, params in fake_transport.requests if method == "turn/start"
+    ]
+    assert turn_start_params[0]["threadId"] == "thr_existing"
 
 
 class FakeStdin:
